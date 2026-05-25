@@ -24,30 +24,19 @@
 
 use crate::config::{AbmModel, AbmParams};
 
-/// 態度の値域 `A = [-1, 1]`．
-pub const ATTITUDE_MIN: f64 = -1.0;
-/// 態度の値域 `A = [-1, 1]`．
-pub const ATTITUDE_MAX: f64 = 1.0;
+// 周辺層の数式は共有パック socsim-social-dynamics に委譲する (socsim #42/#43)．
+// 当該 bare 関数は本リポジトリの旧 `abm.rs` から byte-for-byte 移植されたもので，
+// `clamp_attitude` / `f_message` / 4 つの Δ 更新規則 (BC/HK/SJ/Lorenz) はパック側と
+// 完全一致する (空メッセージ → Δ=0，信頼境界判定は strict `<`)．本リポジトリ側には
+// `AbmModel` / `f_update` ディスパッチ / `AbmParams` (Mobilization メカニズムへの
+// インタフェース) のみを残す．
+pub use socsim_social_dynamics::updates::{ATTITUDE_MAX, ATTITUDE_MIN};
+pub use socsim_social_dynamics::{clamp_attitude, f_message};
 
-/// 態度を値域 `[-1, 1]` にクランプする．
-#[inline]
-pub fn clamp_attitude(a: f64) -> f64 {
-    a.clamp(ATTITUDE_MIN, ATTITUDE_MAX)
-}
-
-/// メッセージ関数 `m_j = f_message(a_j) = a_j`．
-///
-/// 多くの ABM はバイアスなく送信者の態度をそのまま伝える (論文 §6)．
-#[inline]
-pub fn f_message(a_j: f64) -> f64 {
-    a_j
-}
-
-/// 類似度指標 (BC の `sim`): 信頼境界 ε 内なら 1，外なら 0．
-#[inline]
-fn within_bound(a_i: f64, m_j: f64, epsilon: f64) -> bool {
-    (m_j - a_i).abs() < epsilon
-}
+use socsim_social_dynamics::{
+    bounded_confidence_update, hk_update as pack_hk_update, lorenz_update as pack_lorenz_update,
+    social_judgement_update,
+};
 
 impl AbmModel {
     /// 受信メッセージ集合 `messages` (= `{ f_message(a_j) | j ∈ J_i }`) から，
@@ -76,65 +65,39 @@ impl AbmModel {
 /// `Δa = α · sim(a_i, m_j) · (m_j − a_i)` を信頼境界内のソースについて平均する．
 /// `sim = 1` (|m_j − a_i| < ε) のときのみ同化が起き，それ以外は無視．境界内ソース
 /// が無ければ `Δa = 0`．→ 信頼境界内クラスタが合意形成 (収束) しやすい．
+///
+/// 数式は共有パックの [`bounded_confidence_update`] へ委譲する (`AbmParams` →
+/// `(ε, α)` を写像)．
 fn bc_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
-    let mut sum = 0.0;
-    let mut count = 0usize;
-    for &m_j in messages {
-        if within_bound(a_i, m_j, params.epsilon) {
-            sum += params.alpha * (m_j - a_i);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
+    bounded_confidence_update(a_i, messages, params.epsilon, params.alpha)
 }
 
 /// Hegselmann–Krause (2002) — 複数ソース BC．
 ///
 /// 信頼境界 ε 内の全ソース (自身を暗黙に含む) の平均態度へ α の割合で移動する．
 /// `Δa = α · (mean_{|m_j − a_i| < ε} m_j − a_i)`．境界内ソースが無ければ `Δa = 0`．
+///
+/// 数式は共有パックの [`socsim_social_dynamics::hk_update`] へ委譲する．
 fn hk_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
-    // 自分自身も信頼集合に含める (HK の標準; 常に境界内)．
-    let mut sum = a_i;
-    let mut count = 1usize;
-    for &m_j in messages {
-        if within_bound(a_i, m_j, params.epsilon) {
-            sum += m_j;
-            count += 1;
-        }
-    }
-    let mean = sum / count as f64;
-    params.alpha * (mean - a_i)
+    pack_hk_update(a_i, messages, params.epsilon, params.alpha)
 }
 
 /// Social Judgement モデル．
 ///
 /// 受容域 (|m_j − a_i| < ε) では同化，拒否域 (|m_j − a_i| > rejection) では反発
 /// (相手の態度から遠ざかる)，その間 (非関与域) は無視．反発は二極化を生む．
+///
+/// 数式は共有パックの [`social_judgement_update`] へ委譲する (`AbmParams` →
+/// `(ε, α, rejection, repulsion)` を写像)．
 fn sj_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
-    let mut delta = 0.0;
-    let mut count = 0usize;
-    for &m_j in messages {
-        let diff = m_j - a_i;
-        if diff.abs() < params.epsilon {
-            // 受容域: 同化．
-            delta += params.alpha * diff;
-            count += 1;
-        } else if diff.abs() > params.rejection {
-            // 拒否域: 反発 (相手と逆方向へ)．
-            delta -= params.repulsion * diff.signum();
-            count += 1;
-        }
-        // 非関与域 (ε <= |diff| <= rejection) は寄与なし．
-    }
-    if count == 0 {
-        0.0
-    } else {
-        delta / count as f64
-    }
+    social_judgement_update(
+        a_i,
+        messages,
+        params.epsilon,
+        params.alpha,
+        params.rejection,
+        params.repulsion,
+    )
 }
 
 /// Lorenz (2021) — 同化 + 強化 + 分極化．
@@ -142,24 +105,16 @@ fn sj_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
 /// 受容域では同化しつつ，「強化」項で自身の現態度の符号方向へ僅かに増幅し
 /// (確証バイアス的強化)，極端な意見ほど強く分極化する．境界外は無視．
 /// 結果として中庸が崩れ二極化が進む．
+///
+/// 数式は共有パックの [`socsim_social_dynamics::lorenz_update`] へ委譲する．
 fn lorenz_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
-    let mut assimilation = 0.0;
-    let mut count = 0usize;
-    for &m_j in messages {
-        let diff = m_j - a_i;
-        if diff.abs() < params.epsilon {
-            assimilation += params.alpha * diff;
-            count += 1;
-        }
-    }
-    let assimilation = if count == 0 {
-        0.0
-    } else {
-        assimilation / count as f64
-    };
-    // 強化 + 分極化: 現態度の符号方向へ |a_i| に比例して押し出す (極端ほど強く)．
-    let polarization = params.repulsion * a_i.signum() * a_i.abs();
-    assimilation + polarization
+    pack_lorenz_update(
+        a_i,
+        messages,
+        params.epsilon,
+        params.alpha,
+        params.repulsion,
+    )
 }
 
 #[cfg(test)]
