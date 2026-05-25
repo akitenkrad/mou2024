@@ -33,7 +33,7 @@ socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tool
 # 本リポジトリの `abm.rs` から byte-for-byte 移植された bare な message-set Δ 更新
 # (socsim #42/#43) を委譲先とし，重複コードを排する．`AbmModel`/`f_update`/`AbmParams`
 # (Mobilization メカニズムへのインタフェース) は本リポジトリ側に残し，数式のみ委譲する．
-socsim-social-dynamics = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-social-dynamics" }
+socsim-mechanisms = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-mechanisms" }
 # 出力ヘルパ (timestamp / run-dir / latest symlink / CSV・JSON writer)．
 # ライブラリモードのボイラープレートを集約した共有クレット (leaf; 他 socsim-* に非依存)．
 socsim-results = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-results" }

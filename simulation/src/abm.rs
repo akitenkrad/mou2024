@@ -24,16 +24,16 @@
 
 use crate::config::{AbmModel, AbmParams};
 
-// 周辺層の数式は共有パック socsim-social-dynamics に委譲する (socsim #42/#43)．
+// 周辺層の数式は共有パック socsim-mechanisms に委譲する (socsim #42/#43)．
 // 当該 bare 関数は本リポジトリの旧 `abm.rs` から byte-for-byte 移植されたもので，
 // `clamp_attitude` / `f_message` / 4 つの Δ 更新規則 (BC/HK/SJ/Lorenz) はパック側と
 // 完全一致する (空メッセージ → Δ=0，信頼境界判定は strict `<`)．本リポジトリ側には
 // `AbmModel` / `f_update` ディスパッチ / `AbmParams` (Mobilization メカニズムへの
 // インタフェース) のみを残す．
-pub use socsim_social_dynamics::updates::{ATTITUDE_MAX, ATTITUDE_MIN};
-pub use socsim_social_dynamics::{clamp_attitude, f_message};
+pub use socsim_mechanisms::updates::{ATTITUDE_MAX, ATTITUDE_MIN};
+pub use socsim_mechanisms::{clamp_attitude, f_message};
 
-use socsim_social_dynamics::{
+use socsim_mechanisms::{
     bounded_confidence_update, hk_update as pack_hk_update, lorenz_update as pack_lorenz_update,
     social_judgement_update,
 };
@@ -77,7 +77,7 @@ fn bc_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
 /// 信頼境界 ε 内の全ソース (自身を暗黙に含む) の平均態度へ α の割合で移動する．
 /// `Δa = α · (mean_{|m_j − a_i| < ε} m_j − a_i)`．境界内ソースが無ければ `Δa = 0`．
 ///
-/// 数式は共有パックの [`socsim_social_dynamics::hk_update`] へ委譲する．
+/// 数式は共有パックの [`socsim_mechanisms::hk_update`] へ委譲する．
 fn hk_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
     pack_hk_update(a_i, messages, params.epsilon, params.alpha)
 }
@@ -106,7 +106,7 @@ fn sj_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
 /// (確証バイアス的強化)，極端な意見ほど強く分極化する．境界外は無視．
 /// 結果として中庸が崩れ二極化が進む．
 ///
-/// 数式は共有パックの [`socsim_social_dynamics::lorenz_update`] へ委譲する．
+/// 数式は共有パックの [`socsim_mechanisms::lorenz_update`] へ委譲する．
 fn lorenz_update(a_i: f64, messages: &[f64], params: &AbmParams) -> f64 {
     pack_lorenz_update(
         a_i,

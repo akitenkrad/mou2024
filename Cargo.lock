@@ -301,9 +301,9 @@ dependencies = [
  "socsim-core",
  "socsim-engine",
  "socsim-llm",
+ "socsim-mechanisms",
  "socsim-net",
  "socsim-results",
- "socsim-social-dynamics",
 ]
 
 [[package]]
@@ -481,9 +481,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "log"
-version = "0.4.29"
+version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "memchr"
@@ -742,7 +742,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "socsim-core"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
 dependencies = [
  "serde",
  "serde_json",
@@ -753,7 +753,7 @@ dependencies = [
 [[package]]
 name = "socsim-engine"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
 dependencies = [
  "rand",
  "serde",
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "socsim-llm"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
 dependencies = [
  "serde",
  "serde_json",
@@ -773,9 +773,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "socsim-mechanisms"
+version = "0.1.0"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
+dependencies = [
+ "rand",
+ "socsim-core",
+]
+
+[[package]]
 name = "socsim-net"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
 dependencies = [
  "petgraph",
  "rand",
@@ -787,7 +796,7 @@ dependencies = [
 [[package]]
 name = "socsim-results"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
 dependencies = [
  "chrono",
  "csv",
@@ -798,20 +807,11 @@ dependencies = [
 [[package]]
 name = "socsim-rng"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#d7e93a518ddd8f940269039598aad634585e6d4a"
 dependencies = [
  "rand",
  "rand_chacha",
  "serde",
-]
-
-[[package]]
-name = "socsim-social-dynamics"
-version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#4a554876f900bc93495fe87e9600b9cb05dcd00b"
-dependencies = [
- "rand",
- "socsim-core",
 ]
 
 [[package]]
