@@ -21,10 +21,9 @@
 //! テストでは `socsim-llm::mock::ScriptedClient` を `Box<dyn LlmClient>` として
 //! 同じ [`HiSimClient`] に流し込める (`impl LlmClient for Box<T>`; issue #26)．
 
-use socsim_llm::{
-    CachingClient, FallbackClient, LlmClient, LlmConfig, LlmError, OllamaClient, OpenAiClient,
-    PromptCache,
-};
+use std::path::Path;
+
+use socsim_llm::{CachingClient, LlmClient, LlmConfig, LlmError, PromptCache};
 
 use crate::config::LlmSettings;
 
@@ -46,20 +45,10 @@ pub type HiSimClient = CachingClient<Box<dyn LlmClient>>;
 /// - キャッシュ: `settings.cache_path` があればその JSON ファイル，なければ
 ///   in-memory．
 pub fn build_live_client(settings: &LlmSettings) -> Result<HiSimClient, LlmError> {
-    let ollama = OllamaClient::from_env();
-    let openai = OpenAiClient::from_env().unwrap_or_else(|_| {
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        OpenAiClient::new("", model)
-    });
-
-    let fallback = FallbackClient::new(ollama, openai);
-    let backend: Box<dyn LlmClient> = Box::new(fallback);
-
-    let cache = match &settings.cache_path {
-        Some(path) => PromptCache::open(path)?,
-        None => PromptCache::in_memory(),
-    };
-    Ok(CachingClient::new(backend, cache))
+    // «Ollama 第一 → OpenAI フォールバック → 型消去 → キャッシュ» の組み立ては
+    // socsim-llm の `build_live_client` に委譲する (挙動は従来の手書き実装と等価)．
+    // 本ラッパは replication 固有の `LlmSettings` (cache_path) を受け取る薄い層．
+    socsim_llm::build_live_client(settings.cache_path.as_deref().map(Path::new))
 }
 
 /// 任意の [`LlmClient`] (例: `mock::ScriptedClient`) をキャッシュで包んだ

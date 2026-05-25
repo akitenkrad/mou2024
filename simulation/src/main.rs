@@ -8,13 +8,11 @@
 //!               `sweep_summary.csv` に集計する．
 //! `reproduce` : SoMoSiMu-Bench 照合・Table 3 再現 (Phase 3; 未実装スタブ)．
 
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::Path;
 
-use chrono::Local;
 use clap::{Parser, Subcommand};
-use csv::Writer;
+use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
 
 use hisim_simulation::config::{
     parse_abm, parse_network, AbmModel, AbmParams, Config, LlmSettings, NetworkConfig, NetworkKind,
@@ -228,18 +226,6 @@ struct SweepConfigJson {
     llm_seed: u64,
 }
 
-/// latest シンボリックリンクを (再) 作成する．
-fn refresh_latest(output_dir: &str, target: &str) {
-    let symlink_path = Path::new(output_dir).join("latest");
-    if symlink_path.is_symlink() {
-        let _ = fs::remove_file(&symlink_path);
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::os::unix::fs::symlink(target, &symlink_path);
-    }
-}
-
 /// 派生シードのラベルに使う文字列ハッシュ (explicit identity)．
 fn label_hash(label: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
@@ -298,7 +284,7 @@ fn cmd_run(args: RunArgs) {
     let abm_model = parse_abm(&args.abm).unwrap_or_else(|e| panic!("{}", e));
     let net_kind = parse_network(&args.network).unwrap_or_else(|e| panic!("{}", e));
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
 
     let cfg = Config {
@@ -351,15 +337,14 @@ fn cmd_run(args: RunArgs) {
     save_metrics(&result.metrics_history, &cfg.output_dir);
     save_run_metadata(&result, &cfg, &cfg.output_dir);
 
-    // config.json
+    // config.json (pretty-print JSON; socsim_results::write_json に委譲)．
     {
         let path = format!("{}/config.json", cfg.output_dir);
-        let file = File::create(&path).expect("config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &cfg.to_run_config_json())
-            .expect("config.json の書き込みに失敗");
+        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
     }
 
-    refresh_latest(&args.output_dir, &timestamp);
+    // latest シンボリックリンクを再作成する (best-effort; 従来同様エラーは無視)．
+    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
 
     let last = result.metrics_history.last().unwrap();
     println!(
@@ -402,7 +387,7 @@ fn cmd_sweep(args: SweepArgs) {
         .map(|s| parse_network(s).unwrap_or_else(|e| panic!("{e}")))
         .collect();
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
     fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
     if let Some(parent) = Path::new(&args.cache_path).parent() {
@@ -502,15 +487,10 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv
+    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
     {
         let path = format!("{}/sweep_summary.csv", sweep_dir);
-        let file = File::create(&path).expect("sweep_summary.csv の作成に失敗");
-        let mut wtr = Writer::from_writer(BufWriter::new(file));
-        for row in &summary_rows {
-            wtr.serialize(row).expect("サマリ行の書き込みに失敗");
-        }
-        wtr.flush().expect("フラッシュに失敗");
+        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
     }
 
     // sweep_config.json
@@ -529,12 +509,10 @@ fn cmd_sweep(args: SweepArgs) {
             llm_seed: args.llm_seed,
         };
         let path = format!("{}/sweep_config.json", sweep_dir);
-        let file = File::create(&path).expect("sweep_config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &config_json)
-            .expect("sweep_config.json の書き込みに失敗");
+        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
     }
 
-    refresh_latest(&args.output_dir, &format!("{}_sweep", timestamp));
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_sweep", timestamp));
 
     println!("=================================================================");
     println!("スイープ完了: {} 実行", n_total);

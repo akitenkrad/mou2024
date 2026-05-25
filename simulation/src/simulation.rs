@@ -18,7 +18,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::BufWriter;
 use std::rc::Rc;
 
@@ -227,6 +227,11 @@ pub fn run_with_client(
 // --------------------------------------------------------------------------- //
 
 /// メトリクス履歴を long-format CSV (metrics.csv) に保存する．
+///
+/// 各 [`StepMetrics`] を [`StepMetrics::to_rows`] で複数の `MetricRow` に展開して
+/// から逐次 `serialize` する (1 ステップ → 指標名ごとに 1 行)．`socsim_results::
+/// write_csv` は `&[T]` を 1 要素 1 行で直列化するだけでこの «1 要素を複数行へ
+/// 展開» を表現できないため，本 writer は repo ローカルのまま残す．
 pub fn save_metrics(metrics: &[StepMetrics], output_dir: &str) {
     let path = format!("{}/metrics.csv", output_dir);
     let file = File::create(&path).expect("metrics.csv の作成に失敗");
@@ -280,15 +285,20 @@ pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &s
                            Ordinary-tier ABM opinion dynamics, and the scheduler) is deterministic \
                            given the seed. With core-ratio 0.0 there are no LLM calls (pure ABM).",
     };
+    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
+    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
+    // provider/model/endpoint/temperature/seed/core_ratio の値は従来どおり
+    // result / cfg から採り，RunMetadataJson の構造 (フィールド名・順序・
+    // determinism_note) を保持する (`MetadataCollector::summary()` は cache-hit
+    // 100%% 再実行や呼び出し 0 件で endpoint/model が変わりうるため，バイト等価
+    // のためここでは使わない)．
     let path = format!("{}/run_metadata.json", output_dir);
-    let file = File::create(&path).expect("run_metadata.json の作成に失敗");
-    serde_json::to_writer_pretty(BufWriter::new(file), &meta)
-        .expect("run_metadata.json の書き込みに失敗");
+    socsim_results::write_json(&meta, &path).expect("run_metadata.json の書き込みに失敗");
 }
 
 /// 出力ディレクトリを作成する．
 pub fn ensure_output_dir(output_dir: &str) {
-    fs::create_dir_all(output_dir).expect("出力ディレクトリの作成に失敗");
+    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
 }
 
 #[cfg(test)]

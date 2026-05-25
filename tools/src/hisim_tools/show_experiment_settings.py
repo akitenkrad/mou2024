@@ -10,29 +10,22 @@ Usage:
     hisim-tools show-experiment-settings
     hisim-tools show-experiment-settings --results-dir results/20260525_103000
     hisim-tools show-experiment-settings --results-dir results/latest --json
+
+I/O (results_dir 解決・run_metadata ロード) は共有ヘルパ `socsim_tools.io` に委譲する
+(出力はバイト等価)．run 設定テーブルは複合行 (`BA m / WS k,β / ER p`・`ABM α / ε`)
+を含み，run_metadata ブロックは hisim 固有の `プロバイダ`・`コア比率` 行を持ち，かつ
+sweep 設定テーブルと `--json` の `kind` フィールドも hisim 固有なので，これらの
+レンダラは本モジュールにローカルのまま残す．
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-
-def _resolve_results_dir(arg: str) -> Path:
-    """ユーザ指定の results_dir を絶対パスに解決する (symlink も実体へ)．"""
-    p = Path(arg)
-    if not p.is_absolute():
-        candidates = [Path.cwd() / arg, p]
-        for c in candidates:
-            if c.exists():
-                p = c
-                break
-        else:
-            p = candidates[0]
-    return Path(os.path.realpath(p))
+from socsim_tools.io import load_run_metadata, resolve_results_dir
 
 
 def _find_config_file(results_dir: Path) -> tuple[Path, str]:
@@ -47,14 +40,6 @@ def _find_config_file(results_dir: Path) -> tuple[Path, str]:
         f"設定ファイルが見つかりません: {results_dir}\n"
         f"  期待されるファイル: config.json (run) または sweep_config.json (sweep)"
     )
-
-
-def _load_run_metadata(results_dir: Path) -> dict | None:
-    path = results_dir / "run_metadata.json"
-    if path.exists():
-        with path.open() as f:
-            return json.load(f)
-    return None
 
 
 def render_run_config(cfg: dict, source: Path) -> str:
@@ -148,15 +133,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    results_dir = _resolve_results_dir(args.results_dir)
+    results_dir = resolve_results_dir(args.results_dir)
     if not results_dir.exists():
         print(f"エラー: ディレクトリが存在しません: {results_dir}", file=sys.stderr)
         return 1
 
-    cfg_path, kind = _find_config_file(results_dir)
+    try:
+        cfg_path, kind = _find_config_file(results_dir)
+    except FileNotFoundError as exc:
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
     with cfg_path.open() as f:
         cfg = json.load(f)
-    meta = _load_run_metadata(results_dir)
+    meta = load_run_metadata(results_dir)
 
     if args.json:
         payload = {"source": str(cfg_path), "kind": kind, "config": cfg, "run_metadata": meta}
