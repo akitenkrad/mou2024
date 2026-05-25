@@ -1,0 +1,13 @@
+[project]
+name = "mou2024-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "hisim-tools",
+]
+
+[tool.uv.workspace]
+members = ["tools"]
+
+[tool.uv.sources]
+hisim-tools = { workspace = true }
