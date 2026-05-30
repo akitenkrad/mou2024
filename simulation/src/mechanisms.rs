@@ -23,7 +23,10 @@ use socsim_llm::MetadataCollector;
 
 use crate::abm::{clamp_attitude, f_message};
 use crate::config::{AbmParams, LlmSettings};
-use crate::llm::{classify_stance, llm_config, HiSimClient};
+use crate::llm::{
+    classify_stance, classify_stance_llm, llm_config, stance_annotation_prompt, HiSimClient,
+    StanceMode,
+};
 use crate::parse::{parse_action, ActionDecision};
 use crate::prompts::action_prompt;
 use crate::world::{HiSimWorld, Tier};
@@ -114,21 +117,60 @@ pub struct DecisionMechanism {
     metadata: SharedMetadata,
     budget: SharedBudget,
     settings: LlmSettings,
+    stance: StanceMode,
 }
 
 impl DecisionMechanism {
-    /// 共有クライアント・メタデータ・予算・LLM 設定から作る．
+    /// 共有クライアント・メタデータ・予算・LLM 設定・stance モードから作る．
     pub fn new(
         client: SharedClient,
         metadata: SharedMetadata,
         budget: SharedBudget,
         settings: LlmSettings,
+        stance: StanceMode,
     ) -> Self {
         DecisionMechanism {
             client,
             metadata,
             budget,
             settings,
+            stance,
+        }
+    }
+
+    /// 発信メッセージ本文を態度スコア $[-1,1]$ へ写像する．
+    ///
+    /// [`StanceMode::Deterministic`] は決定論的分類器のみ (追加 LLM 呼び出し無し;
+    /// 従来挙動とビット等価)．[`StanceMode::Llm`] はコア LLM へ追加で stance 注釈を
+    /// 問い合わせ ([`stance_annotation_prompt`])，その応答を写像する
+    /// ([`classify_stance_llm`])．注釈 LLM 呼び出しもメタデータ・予算に計上する．
+    fn classify(&self, event: &str, message: &str) -> Result<f64> {
+        match self.stance {
+            StanceMode::Deterministic => Ok(classify_stance(message)),
+            StanceMode::Llm => {
+                if *self.budget.borrow() == 0 {
+                    // 予算切れ時は決定論的分類器へ倒す (再現を壊さず推進する)．
+                    return Ok(classify_stance(message));
+                }
+                let prompt = stance_annotation_prompt(event, message);
+                let text = {
+                    let mut client = self.client.borrow_mut();
+                    let resp = client
+                        .complete(&prompt, &llm_config(&self.settings))
+                        .map_err(|e| {
+                            SocsimError::Mechanism(format!(
+                                "external stance-annotation LLM call failed: {e}"
+                            ))
+                        })?;
+                    self.metadata.borrow_mut().record(resp.metadata.clone());
+                    resp.text
+                };
+                {
+                    let mut b = self.budget.borrow_mut();
+                    *b = b.saturating_sub(1);
+                }
+                Ok(classify_stance_llm(&text, message))
+            }
         }
     }
 }
@@ -197,7 +239,7 @@ impl Mechanism<HiSimWorld> for DecisionMechanism {
             // 発信行動なら stance 分類でメッセージ態度を得て自身を更新 + broadcast．
             if decision.kind.broadcasts() {
                 let msg = decision.message.clone().unwrap_or_default();
-                let stance = classify_stance(&msg);
+                let stance = self.classify(&event, &msg)?;
                 // コア自身の態度をメッセージ stance 方向へ僅かに更新 (postprocessing)．
                 let new_attitude = clamp_attitude(attitude + 0.3 * (stance - attitude));
                 if let Some(a) = ctx.world.attitude.get_mut(&id) {

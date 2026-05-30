@@ -46,11 +46,22 @@ cargo run --release -- sweep \
     --core-ratio-min 0.0 --core-ratio-max 0.5 --core-ratio-step 0.1 \
     --abm-values bc,hk,sj,lorenz --network-values ba --runs 10 --seed 42
 
+# === 論文再現 (Table 2/3 + SoMoSiMu-Bench) ===
+#   ハイブリッド vs 純 ABM の対比 + bench 照合; --mock = 完全オフライン (ライブ LLM 不要)
+cargo run --release -- reproduce --mock --seed 42
+
+# === 外部 LLM stance 注釈 (オプトイン; ライブバックエンドが必要) ===
+#   既定のキーワード分類器はビット等価．`--stance-annotator llm` は
+#   コア LLM に各 post の stance を 5 段階で答えさせる．
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- run \
+    --core-ratio 0.3 --abm bc --stance-annotator llm --seed 42
+
 # === 可視化 ===
 uv sync
 uv run hisim-tools visualize
 uv run hisim-tools visualize-sweep
 uv run hisim-tools show-experiment-settings --results-dir results/latest
+uv run hisim-tools reproduce --run --mock          # reproduce レポート + 図，オフライン
 
 # === オフライン (LLM 不要) スモーク: scripted mock 経由でハイブリッド経路を実行 ===
 cargo run --release --example mock_smoke -- results
@@ -66,11 +77,13 @@ cargo run --release --example mock_smoke -- results
 
 各 `sweep` は `results/{timestamp}_sweep/` に `sweep_summary.csv` と `sweep_config.json` を書き出す．
 
+各 `reproduce` は `results/reproduce_{timestamp}/` に `reproduce_summary.json` (Table 3 の hybrid vs 純 ABM 行列・SoMoSiMu-Bench 照合・観測 vs 論文のアンカーと PASS/off 帯)・条件別 `metrics_<label>.csv` を書き出し，`hisim-tools reproduce` 経由で `figures/{table3_hybrid_vs_pureabm,bench_alignment,mobilization_curves}.png` を生成する．SoMoSiMu-Bench 参照は **較正済み合成**曲線であり生ベンチマークデータではない ([アーキテクチャ](docs/architecture.ja.md) 参照)．
+
 ## ドキュメント
 
-- [アーキテクチャ](docs/architecture.ja.md) — リポジトリ構成・`HiSimWorld` の 2 階層状態・4 メカニズム・ABM 数式．
-- [CLI リファレンス](docs/cli.ja.md) — `run` / `sweep` の全フラグ．
-- [ユースケース](docs/usecases.ja.md) — 純粋 ABM ベースライン・ハイブリッド・感度分析．
+- [アーキテクチャ](docs/architecture.ja.md) — リポジトリ構成・`HiSimWorld` の 2 階層状態・4 メカニズム・ABM 数式・stance 注釈・SoMoSiMu-Bench 照合・`reproduce`．
+- [CLI リファレンス](docs/cli.ja.md) — `run` / `sweep` / `reproduce` の全フラグ．
+- [ユースケース](docs/usecases.ja.md) — 純粋 ABM ベースライン・ハイブリッド・感度分析・論文再現．
 - [可視化](docs/visualization.ja.md) — Python ツール．
 
 ## 参考文献

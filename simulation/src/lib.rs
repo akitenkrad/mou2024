@@ -17,11 +17,13 @@
 //! 純粋 ABM となり，全体が bit 決定論的になる．詳細は `crate::llm` を参照．
 
 pub mod abm;
+pub mod bench;
 pub mod config;
 pub mod llm;
 pub mod mechanisms;
 pub mod metrics;
 pub mod parse;
 pub mod prompts;
+pub mod reproduce_mock;
 pub mod simulation;
 pub mod world;

@@ -42,6 +42,7 @@ fn main() {
         llm_budget: 10_000,
         seed: Some(42),
         llm: LlmSettings::default(),
+        stance: hisim_simulation::config::StanceMode::default(),
         output_dir: output_dir.clone(),
     };
 

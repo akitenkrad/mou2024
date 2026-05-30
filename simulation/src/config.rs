@@ -7,6 +7,8 @@
 
 use serde::Serialize;
 
+pub use crate::llm::{parse_stance_mode, StanceMode};
+
 // --------------------------------------------------------------------------- //
 // ABM 種別 (周辺層の意見力学モデル)
 // --------------------------------------------------------------------------- //
@@ -191,6 +193,8 @@ pub struct Config {
     pub seed: Option<u64>,
     /// LLM レイヤ設定．
     pub llm: LlmSettings,
+    /// コア post の stance → 態度 写像モード (既定: 決定論的; `Llm` で外部 LLM 注釈)．
+    pub stance: StanceMode,
     /// 結果出力ディレクトリ．
     pub output_dir: String,
 }
@@ -209,6 +213,7 @@ impl Default for Config {
             llm_budget: 5000,
             seed: Some(42),
             llm: LlmSettings::default(),
+            stance: StanceMode::default(),
             output_dir: "results".to_string(),
         }
     }
@@ -237,6 +242,7 @@ pub struct RunConfigJson {
     pub seed: Option<u64>,
     pub llm_temperature: f32,
     pub llm_seed: u64,
+    pub stance: String,
     pub output_dir: String,
 }
 
@@ -264,6 +270,7 @@ impl Config {
             seed: self.seed,
             llm_temperature: self.llm.temperature,
             llm_seed: self.llm.seed,
+            stance: self.stance.label().to_string(),
             output_dir: self.output_dir.clone(),
         }
     }

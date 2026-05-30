@@ -6,7 +6,8 @@
 //!               `--core-ratio 0.0` なら純粋 ABM (LLM 呼び出し無し)．
 //! `sweep`     : コア比率 × ABM 種別 × ネットワーク構造 を走査し，最終マクロ指標を
 //!               `sweep_summary.csv` に集計する．
-//! `reproduce` : SoMoSiMu-Bench 照合・Table 3 再現 (Phase 3; 未実装スタブ)．
+//! `reproduce` : 論文 Table 2/3 の見出し的知見 (ハイブリッド vs 純 ABM) と
+//!               SoMoSiMu-Bench 照合を一括再現し reproduce_summary.json + 図に集計する．
 
 use std::fs;
 use std::path::Path;
@@ -14,10 +15,15 @@ use std::path::Path;
 use clap::{Parser, Subcommand};
 use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
 
+use hisim_simulation::bench::{compare_to_bench, reference_curve, MovementMetrics};
 use hisim_simulation::config::{
-    parse_abm, parse_network, AbmModel, AbmParams, Config, LlmSettings, NetworkConfig, NetworkKind,
+    parse_abm, parse_network, parse_stance_mode, AbmModel, AbmParams, Config, LlmSettings,
+    NetworkConfig, NetworkKind, StanceMode,
 };
-use hisim_simulation::simulation::{ensure_output_dir, run, save_metrics, save_run_metadata};
+use hisim_simulation::reproduce_mock::build_reproduce_client;
+use hisim_simulation::simulation::{
+    ensure_output_dir, run, run_with_client, save_metrics, save_run_metadata, SimulationResult,
+};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -39,8 +45,9 @@ enum Commands {
     Run(RunArgs),
     /// コア比率 × ABM 種別 × ネットワーク構造 を走査し最終指標を集計する．
     Sweep(SweepArgs),
-    /// SoMoSiMu-Bench 照合・Table 3 再現 (Phase 3; 未実装)．
-    Reproduce,
+    /// 論文 Table 2/3 の見出し的知見 (ハイブリッド vs 純 ABM) + SoMoSiMu-Bench
+    /// 照合を一括再現し reproduce_summary.json に集計する．
+    Reproduce(ReproduceArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -117,6 +124,11 @@ struct RunArgs {
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
 
+    /// コア post の stance → 態度 写像 (deterministic = 既定の決定論的分類器 /
+    /// llm = 外部 LLM stance 注釈; live バックエンドが必要)．
+    #[arg(long, default_value = "deterministic")]
+    stance_annotator: String,
+
     /// 結果出力ディレクトリ．
     #[arg(long, default_value = "results")]
     output_dir: String,
@@ -179,6 +191,70 @@ struct SweepArgs {
     /// プロンプト→応答キャッシュの保存先 (sweep 全体で共有しヒット率を高める)．
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
+
+    /// 結果出力ベースディレクトリ．
+    #[arg(long, default_value = "results")]
+    output_dir: String,
+}
+
+#[derive(Parser, Debug)]
+struct ReproduceArgs {
+    /// 照合する運動データセット (カンマ区切り; metoo / roe / blm)．
+    #[arg(long, default_value = "metoo,roe,blm")]
+    datasets: String,
+
+    /// 比較する周辺 ABM 種別 (カンマ区切り; bc / hk / sj / lorenz)．
+    #[arg(long, default_value = "bc,hk,sj,lorenz")]
+    abm_values: String,
+
+    /// ハイブリッド条件のコア比率 (純 ABM 条件は常に 0.0)．
+    #[arg(long, default_value_t = 0.3)]
+    core_ratio: f64,
+
+    /// エージェント数 N．
+    #[arg(long, default_value_t = 600)]
+    n_agents: usize,
+
+    /// タイムステップ数 T．
+    #[arg(long, default_value_t = 14)]
+    steps: usize,
+
+    /// 各条件あたりの独立試行数．
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
+
+    /// ネットワーク構造 (ba / ws / er)．
+    #[arg(long, default_value = "ba")]
+    network: String,
+
+    /// 乱数シード基点 (各条件・試行は derive により独立化する)．
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+
+    /// ライブ LLM を呼ばず決定論的 scripted mock で駆動する (オフライン検証用)．
+    /// サンドボックス・CI では `--mock` を付ける (純 ABM 条件は mock 不要)．
+    #[arg(long, default_value_t = false)]
+    mock: bool,
+
+    /// LLM 生成温度 (live 時のみ)．
+    #[arg(long, default_value_t = 0.0)]
+    llm_temperature: f32,
+
+    /// LLM 生成シード (live 時のみ)．
+    #[arg(long, default_value_t = 0)]
+    llm_seed: u64,
+
+    /// コア post の stance → 態度 写像 (deterministic / llm)．
+    #[arg(long, default_value = "deterministic")]
+    stance_annotator: String,
+
+    /// プロンプト→応答キャッシュの保存先 (live 時のみ; 全条件で共有)．
+    #[arg(long, default_value = ".llm_cache/cache.json")]
+    cache_path: String,
+
+    /// 軽量モード (N・runs・steps を縮小; 動作確認用)．
+    #[arg(long, default_value_t = false)]
+    quick: bool,
 
     /// 結果出力ベースディレクトリ．
     #[arg(long, default_value = "results")]
@@ -283,6 +359,7 @@ fn network_config(
 fn cmd_run(args: RunArgs) {
     let abm_model = parse_abm(&args.abm).unwrap_or_else(|e| panic!("{}", e));
     let net_kind = parse_network(&args.network).unwrap_or_else(|e| panic!("{}", e));
+    let stance = parse_stance_mode(&args.stance_annotator).unwrap_or_else(|e| panic!("{}", e));
 
     let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
@@ -307,6 +384,7 @@ fn cmd_run(args: RunArgs) {
             seed: args.llm_seed,
             cache_path: Some(args.cache_path.clone()),
         },
+        stance,
         output_dir: output_dir.clone(),
     };
 
@@ -326,8 +404,13 @@ fn cmd_run(args: RunArgs) {
         cfg.network.kind.label(),
     );
     println!(
-        "seed: {:?} | llm-budget: {} | LLM: temp={} llm_seed={} cache={}",
-        cfg.seed, cfg.llm_budget, cfg.llm.temperature, cfg.llm.seed, args.cache_path
+        "seed: {:?} | llm-budget: {} | stance: {} | LLM: temp={} llm_seed={} cache={}",
+        cfg.seed,
+        cfg.llm_budget,
+        cfg.stance.label(),
+        cfg.llm.temperature,
+        cfg.llm.seed,
+        args.cache_path
     );
     println!("出力先: {}", cfg.output_dir);
     println!("-----------------------------------------------------------------");
@@ -447,6 +530,7 @@ fn cmd_sweep(args: SweepArgs) {
                             seed: args.llm_seed,
                             cache_path: Some(args.cache_path.clone()),
                         },
+                        stance: StanceMode::default(),
                         output_dir: sweep_dir.clone(),
                     };
 
@@ -534,6 +618,461 @@ fn cmd_sweep(args: SweepArgs) {
 }
 
 // ---------------------------------------------------------------------------
+// reproduce — Table 2/3 + SoMoSiMu-Bench 照合
+// ---------------------------------------------------------------------------
+
+/// 1 レジーム (hybrid / pure-abm) × ABM を `runs` 回回した集計セル (Table 3 の元)．
+#[derive(serde::Serialize, Clone)]
+struct ReproCell {
+    /// 条件ラベル (例: "hybrid_bc" / "pureabm_lorenz")．
+    label: String,
+    /// レジーム ("hybrid" = LLM コア + ABM 周辺 / "pure-abm" = core-ratio 0)．
+    regime: String,
+    /// 周辺 ABM 種別．
+    abm: String,
+    /// コア比率 (hybrid は core_ratio，pure-abm は 0.0)．
+    core_ratio: f64,
+    runs: usize,
+    /// 試行平均の最終 macro_bias (集団態度の偏り; Table 3 Bias)．
+    mean_final_bias: f64,
+    /// 試行平均の最終 macro_diversity (意見多様性; Table 3 Div.)．
+    mean_final_diversity: f64,
+    /// 試行平均の最終 polarization (二極化)．
+    mean_final_polarization: f64,
+    /// 試行平均の最終 正規化動員 (mobilized / N)．
+    mean_final_mobilization: f64,
+    /// 試行平均の «動員の伸び» (最終 − 初期 mobilized / N; 正なら運動が拡大)．
+    mean_mobilization_gain: f64,
+    /// 試行平均の総 LLM 呼び出し数 (pure-abm は 0)．
+    mean_llm_calls: f64,
+}
+
+/// 観測値と論文の定性的知見を突き合わせた 1 アンカー．
+#[derive(serde::Serialize)]
+struct ReproAnchor {
+    name: String,
+    paper: String,
+    observed: f64,
+    target_lo: f64,
+    target_hi: f64,
+    pass: bool,
+}
+
+/// 1 レジーム × ABM を `runs` 回実行して集計セルを作る (代表 run の履歴を CSV 保存)．
+#[allow(clippy::too_many_arguments)]
+fn run_repro_cell(
+    label: &str,
+    regime: &str,
+    abm_model: AbmModel,
+    core_ratio: f64,
+    net_kind: NetworkKind,
+    dataset: &str,
+    n_agents: usize,
+    steps: usize,
+    stance: StanceMode,
+    runs: usize,
+    root_seed: u64,
+    mock: bool,
+    llm: &LlmSettings,
+    out_dir: &str,
+) -> (ReproCell, Vec<MovementMetrics>) {
+    let mut final_bias = 0.0;
+    let mut final_div = 0.0;
+    let mut final_pol = 0.0;
+    let mut final_mob = 0.0;
+    let mut mob_gain = 0.0;
+    let mut llm_calls = 0.0;
+    let mut movement_runs: Vec<MovementMetrics> = Vec::with_capacity(runs);
+    let mut representative: Option<Vec<hisim_simulation::metrics::StepMetrics>> = None;
+
+    for run_idx in 0..runs {
+        let seed = socsim_core::derive_seed(
+            root_seed,
+            &[
+                label_hash(regime),
+                label_hash(abm_model.label()),
+                label_hash(dataset),
+                run_idx as u64,
+            ],
+        );
+        let cfg = Config {
+            dataset: dataset.to_string(),
+            n_agents,
+            core_ratio,
+            steps,
+            network: NetworkConfig {
+                kind: net_kind,
+                ..NetworkConfig::default()
+            },
+            abm: AbmParams {
+                model: abm_model,
+                ..AbmParams::default()
+            },
+            mobilization_threshold: 0.5,
+            llm_budget: 1_000_000,
+            seed: Some(seed),
+            llm: llm.clone(),
+            stance,
+            output_dir: out_dir.to_string(),
+        };
+
+        // pure-abm (core_ratio 0) は LLM を一切呼ばないので mock も live も不要．
+        let result: SimulationResult = if core_ratio == 0.0 {
+            run_with_client(&cfg, build_reproduce_client())
+                .unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"))
+        } else if mock {
+            run_with_client(&cfg, build_reproduce_client())
+                .unwrap_or_else(|e| panic!("mock 実行に失敗 ({label}): {e}"))
+        } else {
+            run(&cfg).unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"))
+        };
+
+        let first = result.metrics_history.first().unwrap();
+        let last = result.metrics_history.last().unwrap();
+        let nf = n_agents as f64;
+        final_bias += last.macro_bias;
+        final_div += last.macro_diversity;
+        final_pol += last.polarization;
+        final_mob += last.mobilized as f64 / nf;
+        mob_gain += (last.mobilized as f64 - first.mobilized as f64) / nf;
+        llm_calls += result.metadata.total() as f64;
+        movement_runs.push(MovementMetrics::from_history(
+            &result.metrics_history,
+            n_agents,
+        ));
+        if run_idx == 0 {
+            representative = Some(result.metrics_history.clone());
+        }
+    }
+
+    if let Some(hist) = representative {
+        // 代表 run (run 0) の long-format メトリクスを条件別名で書き出す
+        // (Python 側で時系列描画に使う; save_metrics は metrics.csv 固定名なので使わない)．
+        let path = format!("{out_dir}/metrics_{label}.csv");
+        let file = std::fs::File::create(&path).expect("metrics_<label>.csv の作成に失敗");
+        let mut wtr = csv::Writer::from_writer(std::io::BufWriter::new(file));
+        for m in &hist {
+            for row in m.to_rows() {
+                wtr.serialize(row).expect("メトリクス行の書き込みに失敗");
+            }
+        }
+        wtr.flush().expect("フラッシュに失敗");
+    }
+
+    let n = runs.max(1) as f64;
+    let cell = ReproCell {
+        label: label.to_string(),
+        regime: regime.to_string(),
+        abm: abm_model.label().to_string(),
+        core_ratio,
+        runs,
+        mean_final_bias: final_bias / n,
+        mean_final_diversity: final_div / n,
+        mean_final_polarization: final_pol / n,
+        mean_final_mobilization: final_mob / n,
+        mean_mobilization_gain: mob_gain / n,
+        mean_llm_calls: llm_calls / n,
+    };
+    (cell, movement_runs)
+}
+
+/// 複数 run の運動指標を平均する (bench 照合の観測値)．
+fn mean_movement(runs: &[MovementMetrics]) -> MovementMetrics {
+    let n = runs.len().max(1) as f64;
+    let mut acc = MovementMetrics {
+        mobilization_peak: 0.0,
+        peak_step: 0,
+        final_mobilization: 0.0,
+        final_bias: 0.0,
+        final_polarization: 0.0,
+        sustain_ratio: 0.0,
+    };
+    let mut peak_step_sum = 0.0;
+    for m in runs {
+        acc.mobilization_peak += m.mobilization_peak;
+        peak_step_sum += m.peak_step as f64;
+        acc.final_mobilization += m.final_mobilization;
+        acc.final_bias += m.final_bias;
+        acc.final_polarization += m.final_polarization;
+        acc.sustain_ratio += m.sustain_ratio;
+    }
+    acc.mobilization_peak /= n;
+    acc.peak_step = (peak_step_sum / n).round() as usize;
+    acc.final_mobilization /= n;
+    acc.final_bias /= n;
+    acc.final_polarization /= n;
+    acc.sustain_ratio /= n;
+    acc
+}
+
+fn cmd_reproduce(args: ReproduceArgs) {
+    let datasets = split_csv(&args.datasets);
+    let abm_models: Vec<AbmModel> = split_csv(&args.abm_values)
+        .iter()
+        .map(|s| parse_abm(s).unwrap_or_else(|e| panic!("{e}")))
+        .collect();
+    let net_kind = parse_network(&args.network).unwrap_or_else(|e| panic!("{e}"));
+    let stance = parse_stance_mode(&args.stance_annotator).unwrap_or_else(|e| panic!("{e}"));
+
+    // quick モードは軽量化 (動作確認用)．
+    let n_agents = if args.quick { 80 } else { args.n_agents };
+    let runs = if args.quick { 2 } else { args.runs };
+    let steps = if args.quick { 8 } else { args.steps };
+
+    let ts = timestamp();
+    let out_dir = format!("{}/reproduce_{}", args.output_dir, ts);
+    ensure_output_dir(&out_dir);
+    if !args.mock {
+        if let Some(parent) = Path::new(&args.cache_path).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+
+    let llm = LlmSettings {
+        temperature: args.llm_temperature,
+        seed: args.llm_seed,
+        cache_path: if args.mock {
+            None
+        } else {
+            Some(args.cache_path.clone())
+        },
+    };
+
+    println!("=== Mou et al. (2024) HiSim — Table 2/3 + SoMoSiMu-Bench 一括再現 ===");
+    println!(
+        "datasets: {} | abm: {} 種 | N: {} | T: {} | runs: {} | network: {} | stance: {} | mode: {}",
+        datasets.join(","),
+        abm_models.len(),
+        n_agents,
+        steps,
+        runs,
+        net_kind.label(),
+        stance.label(),
+        if args.mock { "MOCK" } else { "LIVE" },
+    );
+    println!("出力先: {out_dir}");
+    println!("-----------------------------------------------------------------");
+
+    // --- Table 3: hybrid vs pure-abm の ABM 別行列 (代表 dataset = 先頭) ---
+    // 純 ABM 経路 (core-ratio 0) は LLM 0 呼び出しで完全決定論的 = オフライン検証経路．
+    let table3_dataset = datasets
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "metoo".to_string());
+    let mut table3_cells: Vec<ReproCell> = Vec::new();
+    // bench 照合用に «pure-abm BC» の運動指標を dataset ごとに集める．
+    for &abm_model in &abm_models {
+        for &(regime, ratio) in &[("pure-abm", 0.0), ("hybrid", args.core_ratio)] {
+            let label = format!("{}_{}", regime.replace('-', ""), abm_model.label());
+            let (cell, _runs) = run_repro_cell(
+                &label,
+                regime,
+                abm_model,
+                ratio,
+                net_kind,
+                &table3_dataset,
+                n_agents,
+                steps,
+                stance,
+                runs,
+                args.seed,
+                args.mock,
+                &llm,
+                &out_dir,
+            );
+            table3_cells.push(cell);
+        }
+    }
+
+    // --- Table 2: SoMoSiMu-Bench 照合 (dataset 別; pure-abm BC を観測系列とする) ---
+    // 純 ABM の動員ダイナミクスを各運動の較正済み合成参照と照合する (オフライン経路)．
+    let bench_abm = AbmModel::Bc;
+    let mut bench_comparisons: Vec<hisim_simulation::bench::BenchComparison> = Vec::new();
+    for ds in &datasets {
+        let label = format!("bench_{ds}");
+        let (_cell, movement_runs) = run_repro_cell(
+            &label, "pure-abm", bench_abm, 0.0, net_kind, ds, n_agents, steps, stance, runs,
+            args.seed, args.mock, &llm, &out_dir,
+        );
+        let observed = mean_movement(&movement_runs);
+        let reference = reference_curve(ds, steps);
+        bench_comparisons.push(compare_to_bench(ds, observed, &reference));
+    }
+
+    // --- アンカー評価 (論文 Table 2/3 の定性的知見) ---
+    let cell = |regime: &str, abm: &str| -> &ReproCell {
+        table3_cells
+            .iter()
+            .find(|c| c.regime == regime && c.abm == abm)
+            .unwrap_or_else(|| panic!("セル {regime}/{abm} が見つかりません"))
+    };
+    let bc_pure = cell("pure-abm", "bc");
+    let bc_hybrid = cell("hybrid", "bc");
+    let lorenz_pure = cell("pure-abm", "lorenz");
+    let sj_pure = cell("pure-abm", "sj");
+    let hk_pure = cell("pure-abm", "hk");
+
+    let mut anchors: Vec<ReproAnchor> = Vec::new();
+    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: f64| {
+        anchors.push(ReproAnchor {
+            name: name.to_string(),
+            paper: paper.to_string(),
+            observed: obs,
+            target_lo: lo,
+            target_hi: hi,
+            pass: obs >= lo && obs <= hi,
+        });
+    };
+
+    // T3-A: pure-abm は LLM を一切呼ばない (オフライン検証可能経路)．
+    push(
+        "pure_abm_zero_llm_calls",
+        "core-ratio 0 = no LLM",
+        bc_pure.mean_llm_calls,
+        0.0,
+        0.0,
+    );
+    // T3-B: 二極化の順序 BC ≤ {SJ, Lorenz} (論文 §A: BC/HK は合意，SJ/Lorenz は分極)．
+    push(
+        "polarization_lorenz>=bc",
+        "Lorenz polarizes vs BC consensus",
+        lorenz_pure.mean_final_polarization - bc_pure.mean_final_polarization,
+        -1e-9,
+        f64::INFINITY,
+    );
+    push(
+        "polarization_sj>=bc",
+        "SJ polarizes vs BC consensus",
+        sj_pure.mean_final_polarization - bc_pure.mean_final_polarization,
+        -1e-9,
+        f64::INFINITY,
+    );
+    // T3-C: BC/HK は合意寄り (低分極; 分極 < 0.5)．
+    push(
+        "bc_low_polarization",
+        "BC reaches consensus (low polarization)",
+        bc_pure.mean_final_polarization,
+        0.0,
+        0.5,
+    );
+    push(
+        "hk_low_polarization",
+        "HK reaches consensus (low polarization)",
+        hk_pure.mean_final_polarization,
+        0.0,
+        0.5,
+    );
+    // T3-D: ハイブリッド (LLM コア) は純 ABM より動員を牽引する
+    //   (mock では支持コアが call-to-action を発信 → 動員の伸びが純 ABM 以上)．
+    push(
+        "hybrid_amplifies_mobilization (gain_hybrid - gain_pureabm >= 0)",
+        "core LLM drives mobilization",
+        bc_hybrid.mean_mobilization_gain - bc_pure.mean_mobilization_gain,
+        -1e-9,
+        f64::INFINITY,
+    );
+
+    // bench アンカー: 各運動で過半数の指標が整合帯に入る．
+    let bench_total: usize = bench_comparisons.iter().map(|c| c.n_total).sum();
+    let bench_aligned: usize = bench_comparisons.iter().map(|c| c.n_aligned).sum();
+
+    // --- コンソール出力 ---
+    println!("--- Table 3: hybrid vs pure-abm (dataset={table3_dataset}) ---");
+    println!(
+        "{:<18} {:>8} {:>8} {:>8} {:>8} {:>10} {:>8}",
+        "condition", "Bias", "Div.", "Pol.", "Mob.", "Mob-gain", "LLM"
+    );
+    for c in &table3_cells {
+        println!(
+            "{:<18} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10.3} {:>8.1}",
+            c.label,
+            c.mean_final_bias,
+            c.mean_final_diversity,
+            c.mean_final_polarization,
+            c.mean_final_mobilization,
+            c.mean_mobilization_gain,
+            c.mean_llm_calls,
+        );
+    }
+    println!("--- Table 2: SoMoSiMu-Bench 照合 (pure-abm BC; 較正済み合成参照) ---");
+    for c in &bench_comparisons {
+        println!(
+            "  {:<6} [{}] {}/{} 指標が整合 (source={})",
+            c.movement,
+            if c.n_aligned * 2 >= c.n_total {
+                "OK "
+            } else {
+                "off"
+            },
+            c.n_aligned,
+            c.n_total,
+            c.reference_source
+        );
+        for row in &c.rows {
+            println!(
+                "    {:<20} obs={:>7.3} ref={:>7.3} |Δ|={:>6.3} tol={:>5.3} {}",
+                row.metric,
+                row.observed,
+                row.reference,
+                row.abs_error,
+                row.tolerance,
+                if row.aligned { "✓" } else { "·" },
+            );
+        }
+    }
+    println!("--- 論文知見アンカー (Table 2/3) ---");
+    for a in &anchors {
+        let hi = if a.target_hi.is_infinite() {
+            "∞".to_string()
+        } else {
+            format!("{:.3}", a.target_hi)
+        };
+        println!(
+            "[{}] {:<58} obs={:.4} target=[{:.3},{}]",
+            if a.pass { "PASS" } else { "OFF " },
+            a.name,
+            a.observed,
+            a.target_lo,
+            hi,
+        );
+    }
+    let n_pass = anchors.iter().filter(|a| a.pass).count();
+    println!("-----------------------------------------------------------------");
+    println!("{}/{} アンカーが in-band", n_pass, anchors.len());
+    println!("{}/{} bench 指標が整合帯", bench_aligned, bench_total);
+
+    // --- reproduce_summary.json ---
+    let summary = serde_json::json!({
+        "timestamp": ts,
+        "mode": if args.mock { "mock" } else { "live" },
+        "config": {
+            "datasets": datasets,
+            "abm_values": abm_models.iter().map(|m| m.label()).collect::<Vec<_>>(),
+            "core_ratio": args.core_ratio,
+            "n_agents": n_agents,
+            "steps": steps,
+            "runs": runs,
+            "network": net_kind.label(),
+            "stance": stance.label(),
+            "seed": args.seed,
+        },
+        "table3_hybrid_vs_pureabm": table3_cells,
+        "table3_dataset": table3_dataset,
+        "bench_comparisons": bench_comparisons,
+        "bench_aligned": bench_aligned,
+        "bench_total": bench_total,
+        "anchors": anchors,
+        "n_pass": n_pass,
+        "n_total": anchors.len(),
+    });
+    let path = format!("{out_dir}/reproduce_summary.json");
+    write_json(&summary, &path).expect("reproduce_summary.json の書き込みに失敗");
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("reproduce_{ts}"));
+    println!("サマリ → {path}");
+    println!("条件別メトリクス → {out_dir}/metrics_<condition>.csv");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -542,12 +1081,6 @@ fn main() {
     match cli.command {
         Commands::Run(args) => cmd_run(args),
         Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce => {
-            eprintln!(
-                "reproduce は Phase 3 で実装予定です (SoMoSiMu-Bench 照合・Table 3 再現)．\
-                 現状は run / sweep を使ってください．"
-            );
-            std::process::exit(1);
-        }
+        Commands::Reproduce(args) => cmd_reproduce(args),
     }
 }

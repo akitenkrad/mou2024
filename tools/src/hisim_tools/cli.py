@@ -36,7 +36,7 @@ main = build_dispatcher(
             "hisim_tools.show_experiment_settings:main",
         ),
         "reproduce": (
-            "SoMoSiMu-Bench 照合・Table 3 再現 (Phase 3; 未実装スタブ)",
+            "Table 2/3 (hybrid vs pure-ABM) + SoMoSiMu-Bench 照合の一括再現とレポート・図",
             "hisim_tools.reproduce_paper:main",
         ),
     },

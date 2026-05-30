@@ -157,6 +157,7 @@ pub fn run_with_client(
             Rc::clone(&shared_meta),
             Rc::clone(&shared_budget),
             cfg.llm.clone(),
+            cfg.stance,
         )))
         .add_mechanism(Box::new(MobilizationMechanism::new(cfg.abm)))
         .add_mechanism(Box::new(AggregateMechanism::new(
@@ -332,6 +333,7 @@ mod tests {
             llm_budget: 10_000,
             seed: Some(42),
             llm: LlmSettings::default(),
+            stance: crate::config::StanceMode::default(),
             output_dir: "results".to_string(),
         }
     }
@@ -371,6 +373,42 @@ mod tests {
         assert!(
             r.metadata.total() > 0,
             "hybrid should call LLM for core tier"
+        );
+    }
+
+    #[test]
+    fn stance_default_is_bit_identical_to_deterministic() {
+        // 既定 (StanceMode::Deterministic) は従来挙動と完全一致するべき．
+        let mut cfg = cfg_with(0.3, AbmModel::Bc);
+        assert_eq!(cfg.stance, crate::config::StanceMode::Deterministic);
+        let baseline = run_with_client(&cfg, scripted_client()).unwrap();
+
+        cfg.stance = crate::config::StanceMode::Deterministic;
+        let again = run_with_client(&cfg, scripted_client()).unwrap();
+
+        let a: Vec<f64> = baseline
+            .metrics_history
+            .iter()
+            .map(|m| m.macro_bias)
+            .collect();
+        let b: Vec<f64> = again.metrics_history.iter().map(|m| m.macro_bias).collect();
+        assert_eq!(a, b, "deterministic stance must be bit-identical");
+        // 決定論経路は post 分類で追加 LLM 呼び出しをしない (= core 数 × steps のみ)．
+        assert_eq!(baseline.metadata.total(), again.metadata.total());
+    }
+
+    #[test]
+    fn stance_llm_mode_adds_annotation_calls() {
+        // 外部 LLM stance 注釈は post ごとに追加の LLM 呼び出しを発生させる．
+        let det = run_with_client(&cfg_with(0.3, AbmModel::Bc), scripted_client()).unwrap();
+        let mut cfg = cfg_with(0.3, AbmModel::Bc);
+        cfg.stance = crate::config::StanceMode::Llm;
+        let llm = run_with_client(&cfg, scripted_client()).unwrap();
+        assert!(
+            llm.metadata.total() > det.metadata.total(),
+            "LLM stance mode should make extra annotation calls: {} vs {}",
+            llm.metadata.total(),
+            det.metadata.total()
         );
     }
 

@@ -46,11 +46,22 @@ cargo run --release -- sweep \
     --core-ratio-min 0.0 --core-ratio-max 0.5 --core-ratio-step 0.1 \
     --abm-values bc,hk,sj,lorenz --network-values ba --runs 10 --seed 42
 
+# === Reproduce the paper (Table 2/3 + SoMoSiMu-Bench) ===
+#   Hybrid vs pure-ABM contrast + bench alignment; --mock = fully offline (no live LLM)
+cargo run --release -- reproduce --mock --seed 42
+
+# === External-LLM stance annotation (opt-in; needs a live backend) ===
+#   The default keyword classifier is bit-identical; `--stance-annotator llm`
+#   asks the core LLM to classify each post's stance on a 5-point scale.
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- run \
+    --core-ratio 0.3 --abm bc --stance-annotator llm --seed 42
+
 # === Visualization ===
 uv sync
 uv run hisim-tools visualize
 uv run hisim-tools visualize-sweep
 uv run hisim-tools show-experiment-settings --results-dir results/latest
+uv run hisim-tools reproduce --run --mock          # reproduce report + figures, offline
 
 # === Offline (no live LLM) smoke: hybrid path via a scripted mock client ===
 cargo run --release --example mock_smoke -- results
@@ -66,11 +77,13 @@ Each `run` writes to `results/{timestamp}/` (with a `latest` symlink):
 
 Each `sweep` writes `results/{timestamp}_sweep/` with `sweep_summary.csv` and `sweep_config.json`.
 
+Each `reproduce` writes `results/reproduce_{timestamp}/` with `reproduce_summary.json` (the Table 3 hybrid-vs-pure-ABM matrix, the SoMoSiMu-Bench alignment, and observed-vs-paper anchors with PASS/off bands), per-condition `metrics_<label>.csv`, and — via `hisim-tools reproduce` — `figures/{table3_hybrid_vs_pureabm,bench_alignment,mobilization_curves}.png`. The SoMoSiMu-Bench reference is a **calibrated synthetic** curve, not the raw benchmark dataset (see [Architecture](docs/architecture.md)).
+
 ## Documentation
 
-- [Architecture](docs/architecture.md) — repository layout, the `HiSimWorld` two-tier state, the four mechanisms and the ABM math.
-- [CLI reference](docs/cli.md) — every `run` / `sweep` flag.
-- [Use cases](docs/usecases.md) — pure-ABM baseline, hybrid, sensitivity sweeps.
+- [Architecture](docs/architecture.md) — repository layout, the `HiSimWorld` two-tier state, the four mechanisms, the ABM math, stance annotation, SoMoSiMu-Bench alignment and `reproduce`.
+- [CLI reference](docs/cli.md) — every `run` / `sweep` / `reproduce` flag.
+- [Use cases](docs/usecases.md) — pure-ABM baseline, hybrid, sensitivity sweeps, paper reproduction.
 - [Visualization](docs/visualization.md) — the Python tools.
 
 ## References
