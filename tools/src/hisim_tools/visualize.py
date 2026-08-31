@@ -2,16 +2,19 @@
 """
 visualize.py — Mou et al. (2024) HiSim 単一実行結果 可視化スクリプト
 
-results/latest (または --results_dir 指定先) の metrics.csv (long-format) を読み，
-以下の図を生成する:
+run ディレクトリの metrics.csv を読み，以下の図を生成する:
 (1) 平均態度 (macro_bias) の時系列 (集団態度の偏り; Table 3 ΔBias)
 (2) 動員 (mobilized) 規模の時系列 (動員曲線)
 (3) 意見多様性 (macro_diversity) と分極化 (polarization) の時系列
 (4) コア層の平均態度 (core_influence) の時系列 (コア→周辺ドライバ)
 
+--results_dir を省略すると
+`runvault path --experiment hisim --latest --subcommand run --standalone`
+が返す run ディレクトリを対象にする (`runvault` が PATH にある必要がある)．
+
 Usage:
     uv run hisim-tools visualize
-    uv run hisim-tools visualize --results_dir results/20260525_103000
+    uv run hisim-tools visualize --results_dir "$(runvault path --experiment hisim --latest --subcommand run)"
     uv run hisim-tools visualize --output_dir out
 
 Outputs:
@@ -26,6 +29,12 @@ import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from runvault.read import figures_dir, metrics_wide, runvault_path
+
+# --------------------------------------------------------------------------- #
+# runvault の experiment 名 (Rust 側 record::EXPERIMENT と揃える)
+# --------------------------------------------------------------------------- #
+EXPERIMENT = "hisim"
 
 # --------------------------------------------------------------------------- #
 # 日本語フォント設定
@@ -44,13 +53,19 @@ COLOR_CORE = "#FF9800"
 
 
 def load_metrics(path: str) -> pd.DataFrame:
-    """metrics.csv (long-format: t, metric, value) を wide-format にピボットする．"""
-    if not os.path.exists(path):
+    """metrics.csv を wide-format にピボットし，時間軸の列名を `t` に揃える．
+
+    runvault 移行前の metrics.csv は long でも列が `t, metric, value` だったので，
+    移行前の results/ もそのまま読めるようにしておく．
+    """
+    df = pd.read_csv(path) if os.path.exists(path) else None
+    if df is None:
         raise FileNotFoundError(f"metrics.csv が見つかりません: {path}")
-    long_df = pd.read_csv(path)
-    wide = long_df.pivot_table(index="t", columns="metric", values="value").reset_index()
-    wide.columns.name = None
-    return wide.sort_values("t").reset_index(drop=True)
+    if {"t", "metric", "value"}.issubset(df.columns):
+        wide = df.pivot_table(index="t", columns="metric", values="value").reset_index()
+        wide.columns.name = None
+        return wide.sort_values("t").reset_index(drop=True)
+    return metrics_wide(path).rename(columns={"step": "t"})
 
 
 def save_metrics_timeseries(df: pd.DataFrame, out_path: str) -> None:
@@ -122,14 +137,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results_dir",
         "--results-dir",
-        default="results/latest",
-        help="Rust シミュレーションの出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="run ディレクトリ (省略時は runvault path --latest --subcommand run)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="runvault の results ルート (default: results)",
+    )
+    p.add_argument(
+        "--experiment",
+        default=EXPERIMENT,
+        help=f"runvault の experiment 名 (default: {EXPERIMENT})",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {results_dir}/figures)",
+        help="図の保存先ディレクトリ (default: <experiment>/figures/<run_slug>)",
     )
     return p.parse_args(argv)
 
@@ -137,11 +163,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    metrics_path = os.path.join(args.results_dir, "metrics.csv")
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.results_dir, "figures")
+    # sweep の子 run は subcommand=sweep-point なので，--subcommand run だけで
+    # 単発の run に絞れる．
+    results_dir = args.results_dir or runvault_path(
+        args.experiment, args.results_root, subcommand="run"
+    )
+    metrics_path = os.path.join(results_dir, "metrics.csv")
+    out_dir = args.output_dir if args.output_dir else figures_dir(results_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Mou et al. (2024) HiSim 単一実行結果 可視化 ===")
+    print(f"run:        {results_dir}")
     print(f"メトリクス: {metrics_path}")
     print(f"出力先:     {out_dir}")
     print("-----------------------------------------")

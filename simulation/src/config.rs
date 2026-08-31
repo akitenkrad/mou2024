@@ -195,8 +195,6 @@ pub struct Config {
     pub llm: LlmSettings,
     /// コア post の stance → 態度 写像モード (既定: 決定論的; `Llm` で外部 LLM 注釈)．
     pub stance: StanceMode,
-    /// 結果出力ディレクトリ．
-    pub output_dir: String,
 }
 
 impl Default for Config {
@@ -214,15 +212,16 @@ impl Default for Config {
             seed: Some(42),
             llm: LlmSettings::default(),
             stance: StanceMode::default(),
-            output_dir: "results".to_string(),
         }
     }
 }
 
-/// `config.json` (run 用) のシリアライズ表現．
+/// run 1 本の実験条件 (runvault の `config.json` の `parameters` に載る)．
+///
+/// どのサブコマンドかは `run.json` が持ち，出力先は run ディレクトリそのものなので，
+/// 旧 `config.json` にあった `command` / `output_dir` はここには無い．
 #[derive(Serialize)]
 pub struct RunConfigJson {
-    pub command: &'static str,
     pub dataset: String,
     pub n_agents: usize,
     pub core_ratio: f64,
@@ -239,18 +238,21 @@ pub struct RunConfigJson {
     pub er_p: f64,
     pub mobilization_threshold: f64,
     pub llm_budget: usize,
-    pub seed: Option<u64>,
+    /// 実体化した乱数シード．`--seed` 省略時にランダムに引いた値もここに入る
+    /// (`seed_pointers` が指すのはこの値で，どのシードで回ったのかを必ず残す)．
+    pub seed: u64,
     pub llm_temperature: f32,
     pub llm_seed: u64,
     pub stance: String,
-    pub output_dir: String,
 }
 
 impl Config {
-    /// `config.json` 用の表現を組み立てる．
-    pub fn to_run_config_json(&self) -> RunConfigJson {
+    /// runvault の `parameters` 用の表現を組み立てる．
+    ///
+    /// `seed` には実体化したシードを渡す — `Config::seed` は `--seed` 省略時に
+    /// `None` のままなので，そのまま書くとどのシードで回ったのかが記録に残らない．
+    pub fn to_run_config_json(&self, seed: u64) -> RunConfigJson {
         RunConfigJson {
-            command: "run",
             dataset: self.dataset.clone(),
             n_agents: self.n_agents,
             core_ratio: self.core_ratio,
@@ -267,11 +269,10 @@ impl Config {
             er_p: self.network.er_p,
             mobilization_threshold: self.mobilization_threshold,
             llm_budget: self.llm_budget,
-            seed: self.seed,
+            seed,
             llm_temperature: self.llm.temperature,
             llm_seed: self.llm.seed,
             stance: self.stance.label().to_string(),
-            output_dir: self.output_dir.clone(),
         }
     }
 }

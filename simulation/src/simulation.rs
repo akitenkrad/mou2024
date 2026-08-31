@@ -6,8 +6,8 @@
 //!   (= scheduler + 周辺 ABM の確率的選択) を派生する．bit 単位で再現する．
 //! - **上層 (非決定的 LLM レイヤ)**: [`crate::llm`] のキャッシュ付き Ollama→OpenAI
 //!   フォールバッククライアントに閉じ込め，`temperature=0`/`seed` 固定 + プロンプト
-//!   →応答キャッシュで擬似決定論化する．モデル・endpoint・温度・seed・cache-hit を
-//!   `run_metadata.json` に記録する．
+//!   →応答キャッシュで擬似決定論化する．モデル・温度は `run.json` の `llm`
+//!   ブロックが，呼び出し数と cache-hit 率は `metrics.csv` の run スコープ指標が持つ．
 //!
 //! # 2 階層割当
 //!
@@ -18,13 +18,9 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::BufWriter;
 use std::rc::Rc;
 
-use csv::Writer;
 use rand::Rng;
-use serde::Serialize;
 
 use socsim_core::{derive_seed, AgentId, SimRng};
 use socsim_engine::{RandomActivationScheduler, SimulationBuilder};
@@ -32,7 +28,7 @@ use socsim_llm::MetadataCollector;
 use socsim_net::SocialNetwork;
 
 use crate::config::{Config, NetworkKind};
-use crate::llm::{build_live_client, HiSimClient};
+use crate::llm::HiSimClient;
 use crate::mechanisms::{
     AggregateMechanism, DecisionMechanism, EnvironmentMechanism, MobilizationMechanism,
     SharedBudget, SharedClient, SharedMetadata,
@@ -120,18 +116,16 @@ pub fn init_world(cfg: &Config, rng: &mut SimRng) -> HiSimWorld {
     HiSimWorld::new(network, attitude, tier, core, cfg.steps as u64)
 }
 
-/// シミュレーションを実行する (本番 LLM クライアントを構築して駆動)．
-pub fn run(cfg: &Config) -> std::result::Result<SimulationResult, String> {
-    let client =
-        build_live_client(&cfg.llm).map_err(|e| format!("LLM クライアント構築に失敗: {e}"))?;
-    run_with_client(cfg, client)
-}
-
 /// 与えられた [`HiSimClient`] でシミュレーションを実行する．
 ///
-/// 本番は [`build_live_client`] の結果を，テストは [`crate::llm::wrap_client`] で
-/// ラップした `mock::ScriptedClient` を渡す．`core_ratio = 0.0` のときコアは
-/// 0 体なので LLM クライアントは構築されても一切呼ばれない (純粋 ABM)．
+/// 本番は [`crate::llm::build_live_client`] の結果を，テストは
+/// [`crate::llm::wrap_client`] でラップした `mock::ScriptedClient` を渡す．
+/// `core_ratio = 0.0` のときコアは 0 体なので LLM クライアントは構築されても
+/// 一切呼ばれない (純粋 ABM)．
+///
+/// クライアントを内側で組む入口はもう無い．`run.json` の `llm` ブロックに書く
+/// モデル名と endpoint を知っているのはクライアントを組んだ側だけなので，中で
+/// 組める口が残っていると，そのブロックを埋めないまま記録できてしまう．
 pub fn run_with_client(
     cfg: &Config,
     client: HiSimClient,
@@ -223,85 +217,6 @@ pub fn run_with_client(
     })
 }
 
-// --------------------------------------------------------------------------- //
-// 出力
-// --------------------------------------------------------------------------- //
-
-/// メトリクス履歴を long-format CSV (metrics.csv) に保存する．
-///
-/// 各 [`StepMetrics`] を [`StepMetrics::to_rows`] で複数の `MetricRow` に展開して
-/// から逐次 `serialize` する (1 ステップ → 指標名ごとに 1 行)．`socsim_results::
-/// write_csv` は `&[T]` を 1 要素 1 行で直列化するだけでこの «1 要素を複数行へ
-/// 展開» を表現できないため，本 writer は repo ローカルのまま残す．
-pub fn save_metrics(metrics: &[StepMetrics], output_dir: &str) {
-    let path = format!("{}/metrics.csv", output_dir);
-    let file = File::create(&path).expect("metrics.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for m in metrics {
-        for row in m.to_rows() {
-            wtr.serialize(row).expect("メトリクス行の書き込みに失敗");
-        }
-    }
-    wtr.flush().expect("フラッシュに失敗");
-}
-
-/// `run_metadata.json` の構造体 (LLM モデル・endpoint・温度・seed・cache 統計)．
-#[derive(Serialize)]
-pub struct RunMetadataJson {
-    pub provider: String,
-    pub llm_model: String,
-    pub llm_endpoint: String,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub core_ratio: f64,
-    pub total_calls: usize,
-    pub cache_hits: usize,
-    pub cache_hit_rate: f64,
-    pub determinism_note: &'static str,
-}
-
-/// `run_metadata.json` を保存する．
-pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &str) {
-    let provider =
-        if result.llm_endpoint.contains("11434") || result.llm_endpoint.contains("ollama") {
-            "ollama"
-        } else if result.llm_endpoint.contains("mock") {
-            "mock"
-        } else {
-            "openai"
-        };
-    let meta = RunMetadataJson {
-        provider: provider.to_string(),
-        llm_model: result.llm_model.clone(),
-        llm_endpoint: result.llm_endpoint.clone(),
-        llm_temperature: cfg.llm.temperature,
-        llm_seed: cfg.llm.seed,
-        core_ratio: cfg.core_ratio,
-        total_calls: result.metadata.total(),
-        cache_hits: result.metadata.cache_hits(),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
-        determinism_note: "LLM output is outside socsim bit-reproducibility; the prompt->response \
-                           cache (with temperature=0 and fixed seed) is the reproducibility \
-                           mechanism. The socsim core (network generation, tier assignment, the \
-                           Ordinary-tier ABM opinion dynamics, and the scheduler) is deterministic \
-                           given the seed. With core-ratio 0.0 there are no LLM calls (pure ABM).",
-    };
-    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
-    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
-    // provider/model/endpoint/temperature/seed/core_ratio の値は従来どおり
-    // result / cfg から採り，RunMetadataJson の構造 (フィールド名・順序・
-    // determinism_note) を保持する (`MetadataCollector::summary()` は cache-hit
-    // 100%% 再実行や呼び出し 0 件で endpoint/model が変わりうるため，バイト等価
-    // のためここでは使わない)．
-    let path = format!("{}/run_metadata.json", output_dir);
-    socsim_results::write_json(&meta, &path).expect("run_metadata.json の書き込みに失敗");
-}
-
-/// 出力ディレクトリを作成する．
-pub fn ensure_output_dir(output_dir: &str) {
-    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +249,6 @@ mod tests {
             seed: Some(42),
             llm: LlmSettings::default(),
             stance: crate::config::StanceMode::default(),
-            output_dir: "results".to_string(),
         }
     }
 

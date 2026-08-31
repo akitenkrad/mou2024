@@ -64,7 +64,7 @@ cargo run --release -- reproduce --mock --seed 42
 uv run hisim-tools reproduce --run --mock
 ```
 
-`reproduce_summary.json` records observed-vs-paper anchors with PASS/off bands (pure-ABM = zero LLM calls; Lorenz/SJ polarize above BC; BC/HK stay in consensus; the LLM core amplifies mobilization) and the per-movement bench alignment. The bench reference is a **calibrated synthetic** curve — the raw SoMoSiMu-Bench dataset is not bundled, so the comparison checks qualitative agreement, not exact numbers.
+`events.jsonl` records observed-vs-paper anchors with PASS/off bands (pure-ABM = zero LLM calls; Lorenz/SJ polarize above BC; BC/HK stay in consensus; the LLM core amplifies mobilization) and the per-movement bench alignment. The bench reference is a **calibrated synthetic** curve — the raw SoMoSiMu-Bench dataset is not bundled, so the comparison checks qualitative agreement, not exact numbers.
 
 ## 6. External-LLM stance annotation
 

@@ -2,19 +2,22 @@
 
 # 可視化
 
-Python パッケージ `hisim-tools` (uv workspace メンバ) が Rust の出力を読み，matplotlib / pandas / numpy / networkx で図を描画する．
+Python パッケージ `hisim-tools` (uv workspace メンバ) が Rust の出力を読み，matplotlib / pandas / numpy / networkx で図を描画する．run ディレクトリの読み方は `runvault` パッケージ (`runvault.read`) に預けてある — `results/` を走査して新しそうなディレクトリを当てにいくのではなく，`runvault path` に聞く．
 
 ```bash
 uv sync
 ```
 
+`--results_dir` を省略すると `runvault path --latest` が解決するので，`runvault` が PATH にあるか，環境変数 `RUNVAULT` がバイナリを指している必要がある．図は run ディレクトリの外 (`results/hisim/figures/<run_slug>/`) に出る — `manifest.csv` は run が終わった時点で確定するので，後から `artifacts/` に足した図にはハッシュが付かない．
+
 ## `visualize` — 単一実行
 
 ```bash
-uv run hisim-tools visualize --results_dir results/latest
+uv run hisim-tools visualize
+uv run hisim-tools visualize --results_dir "$(runvault path --experiment hisim --latest --subcommand run)"
 ```
 
-`metrics.csv` (long-format) を読み，`metrics_timeseries.png` (4 パネル) を書き出す:
+run ディレクトリの `metrics.csv` を読み，`metrics_timeseries.png` (4 パネル) を書き出す:
 
 1. 平均態度 `macro_bias` の時系列 (集団態度の偏り; Table 3 ΔBias)
 2. `mobilized` 数の時系列 (動員曲線)
@@ -24,33 +27,34 @@ uv run hisim-tools visualize --results_dir results/latest
 ## `visualize-sweep` — スイープ結果
 
 ```bash
-uv run hisim-tools visualize-sweep --results_dir results/latest
+uv run hisim-tools visualize-sweep
+uv run hisim-tools visualize-sweep --results_dir "$(runvault path --experiment hisim --latest --subcommand sweep)"
 ```
 
-`sweep_summary.csv` を読み，`sweep_dependence.png` (3 パネル) を書き出す: ABM モデル別のコア比率→最終分極化依存・モデル別最終分極化・ネットワーク別最終コア影響．
+sweep 親の子 run から «1 行 1 試行» の表を組み直し (`hisim_tools.sweep_summary`)，`sweep_dependence.png` (3 パネル) を書き出す: ABM モデル別のコア比率→最終分極化依存・モデル別最終分極化・ネットワーク別最終コア影響．
 
 ## `show-experiment-settings`
 
 ```bash
-uv run hisim-tools show-experiment-settings --results-dir results/latest
-uv run hisim-tools show-experiment-settings --results-dir results/latest --json
+uv run hisim-tools show-experiment-settings
+uv run hisim-tools show-experiment-settings --json
 ```
 
-解決済みの `config.json` (または `sweep_config.json`) と，存在すれば `run_metadata.json` の LLM ブロック (プロバイダ / モデル / endpoint / 温度 / seed / core-ratio / cache-hit 率) を表示する．
+`config.json` の `parameters` (run か sweep 親かは `core_ratio_values` の有無で判別する) と，`run.json` の `llm` ブロック + `metrics.csv` の LLM 呼び出し内訳を表示する．移行前の flat な `config.json` / `sweep_config.json` / `run_metadata.json` も読める．
 
 ## `reproduce`
 
 ```bash
 uv run hisim-tools reproduce --run --mock          # Rust reproduce をオフライン実行し，レポート + 図を描画
 uv run hisim-tools reproduce --run --mock --quick  # 高速スモーク
-uv run hisim-tools reproduce                        # 既存の results/latest の reproduce 実行を可視化
-uv run hisim-tools reproduce --json                 # 生の reproduce_summary.json を出力
+uv run hisim-tools reproduce                        # 既存の最新 reproduce run を可視化
+uv run hisim-tools reproduce --json                 # 条件セル・アンカー・bench 判定を JSON で出力
 ```
 
-`hisim reproduce` が書き出す `reproduce_summary.json` (Table 3 の hybrid vs 純 ABM 行列・SoMoSiMu-Bench 照合・観測 vs 論文アンカー) と条件別 `metrics_<label>.csv` を読み，PASS/off レポートを表示して `{results_dir}/figures/` に 3 つの図を書き出す:
+`hisim reproduce` の run ディレクトリを読み — 条件セルは `metrics.csv` の run スコープ指標 (`<条件ラベル>_mean_final_*`)，PASS/off と bench の整合は `events.jsonl` の `x.mou2024.anchor` / `x.mou2024.bench_alignment` — PASS/off レポートを表示して `results/hisim/figures/<run_slug>/` に 3 つの図を書き出す:
 
 - `table3_hybrid_vs_pureabm.png` — 一般層モデル別の最終 polarization・mobilization を hybrid vs 純 ABM で対比 (BC/HK は合意・SJ/Lorenz は二極化; LLM コアが動員を牽引)．
-- `bench_alignment.png` — 運動別の観測 (シミュレータ) vs 参照運動指標; 参照は **較正済み合成**曲線であり生ベンチマークデータではない．
+- `bench_alignment.png` — 運動別の観測 (シミュレータ) vs 参照運動指標; 参照は **合成**曲線であり生ベンチマークデータではない．
 - `mobilization_curves.png` — 代表 run の動員曲線時系列，hybrid vs 純 ABM．
 
 `--run --mock` でパイプラインは完全オフライン (純 ABM 条件と bench 照合は LLM を呼ばず，ハイブリッド条件は scripted client で駆動)．

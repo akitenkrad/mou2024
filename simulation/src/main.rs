@@ -4,26 +4,32 @@
 //!
 //! `run`       : 単一設定で 2 階層ハイブリッド (LLM コア + ABM 周辺) を実行する．
 //!               `--core-ratio 0.0` なら純粋 ABM (LLM 呼び出し無し)．
-//! `sweep`     : コア比率 × ABM 種別 × ネットワーク構造 を走査し，最終マクロ指標を
-//!               `sweep_summary.csv` に集計する．
+//! `sweep`     : コア比率 × ABM 種別 × ネットワーク構造 を走査する．親 run 1 本と，
+//!               条件 1 点ごとの子 run (`sweep-point`) に分ける．
 //! `reproduce` : 論文 Table 2/3 の見出し的知見 (ハイブリッド vs 純 ABM) と
-//!               SoMoSiMu-Bench 照合を一括再現し reproduce_summary.json + 図に集計する．
+//!               SoMoSiMu-Bench 照合を一括再現する．
+//!
+//! 出力の置き場と同一性は runvault が持つ．タイムスタンプ付きディレクトリも
+//! `latest` シンボリックリンクもこちらでは作らず，`Run::start` が決めた run
+//! ディレクトリへ書く．
 
 use std::fs;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
+use runvault::{Lineage, Run, RunOptions};
+use serde::Serialize;
 
 use hisim_simulation::bench::{compare_to_bench, reference_curve, MovementMetrics};
 use hisim_simulation::config::{
     parse_abm, parse_network, parse_stance_mode, AbmModel, AbmParams, Config, LlmSettings,
     NetworkConfig, NetworkKind, StanceMode,
 };
+use hisim_simulation::llm::{build_live_client, HiSimClient};
+use hisim_simulation::metrics::StepMetrics;
+use hisim_simulation::record::{self, ANCHOR_EVENT, BENCH_EVENT, DOMAIN, EXPERIMENT, REPO_ID};
 use hisim_simulation::reproduce_mock::build_reproduce_client;
-use hisim_simulation::simulation::{
-    ensure_output_dir, run, run_with_client, save_metrics, save_run_metadata, SimulationResult,
-};
+use hisim_simulation::simulation::{run_with_client, SimulationResult};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -269,31 +275,9 @@ struct ReproduceArgs {
 // 補助
 // ---------------------------------------------------------------------------
 
-/// `sweep_summary.csv` の 1 行．
-#[derive(serde::Serialize)]
-struct SweepRow {
-    dataset: String,
-    abm: String,
-    network: String,
-    core_ratio: f64,
-    n_agents: usize,
-    run: usize,
-    seed: u64,
-    converged: bool,
-    final_step: usize,
-    final_macro_bias: f64,
-    final_macro_diversity: f64,
-    final_mobilized: usize,
-    final_polarization: f64,
-    final_core_influence: f64,
-    total_llm_calls: usize,
-    cache_hit_rate: f64,
-}
-
-/// `sweep_config.json` の構造体．
-#[derive(serde::Serialize)]
-struct SweepConfigJson {
-    command: &'static str,
+/// スイープ親 run の実験条件 (グリッド定義そのもの)．
+#[derive(Serialize)]
+struct SweepParameters {
     dataset: String,
     core_ratio_values: Vec<f64>,
     abm_values: Vec<String>,
@@ -301,19 +285,51 @@ struct SweepConfigJson {
     n_agents: usize,
     steps: usize,
     runs: usize,
+    llm_budget: usize,
     seed: u64,
     llm_temperature: f32,
     llm_seed: u64,
 }
 
-/// 派生シードのラベルに使う文字列ハッシュ (explicit identity)．
-fn label_hash(label: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in label.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+/// スイープの子 run (network × abm × core-ratio の 1 点) の実験条件．
+///
+/// `run` の条件に `runs` が付いた形で，`run` とは別のサブコマンド名を持つ．
+/// 同じ `run` を名乗らせると，「1 本のシミュレーション」と「同一条件の
+/// `runs` 本」という中身の違う 2 つが 1 つの名前に同居し，`runvault path
+/// --subcommand run` がどちらを返すか分からなくなる．
+#[derive(Serialize)]
+struct SweepPointParameters {
+    dataset: String,
+    network: String,
+    abm: String,
+    core_ratio: f64,
+    n_agents: usize,
+    steps: usize,
+    runs: usize,
+    llm_budget: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+}
+
+/// `reproduce` run の実験条件．
+///
+/// `n_agents` / `runs` / `steps` は `--quick` を反映した **実際に回した値**で，
+/// `--quick` そのものは持たない (同じ条件なら同じ config_hash になる)．
+#[derive(Serialize)]
+struct ReproduceParameters {
+    datasets: Vec<String>,
+    abm_values: Vec<String>,
+    core_ratio: f64,
+    n_agents: usize,
+    steps: usize,
+    runs: usize,
+    network: String,
+    stance: String,
+    mock: bool,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
 }
 
 /// カンマ区切り文字列を trim 済みの非空リストへ．
@@ -365,8 +381,9 @@ fn cmd_run(args: RunArgs) {
     let net_kind = parse_network(&args.network).unwrap_or_else(|e| panic!("{}", e));
     let stance = parse_stance_mode(&args.stance_annotator).unwrap_or_else(|e| panic!("{}", e));
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
+    // シードを実体化してから記録する．--seed 省略時にシミュレーション側で
+    // rand::random に落とすと，実際に使われたシードがどこにも残らない．
+    let seed = args.seed.unwrap_or_else(rand::random::<u64>);
 
     let cfg = Config {
         dataset: args.dataset.clone(),
@@ -382,20 +399,43 @@ fn cmd_run(args: RunArgs) {
         },
         mobilization_threshold: args.mobilization_threshold,
         llm_budget: args.llm_budget,
-        seed: args.seed,
+        seed: Some(seed),
         llm: LlmSettings {
             temperature: args.llm_temperature,
             seed: args.llm_seed,
             cache_path: Some(args.cache_path.clone()),
         },
         stance,
-        output_dir: output_dir.clone(),
     };
 
     if let Some(parent) = Path::new(&args.cache_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    ensure_output_dir(&cfg.output_dir);
+
+    // LLM クライアントは run を開始する前に組む．`llm` ブロックに書くモデル名と
+    // endpoint は，実際に応答するバックエンドから採らないと意味を持たない．
+    let client =
+        build_live_client(&cfg.llm).unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"));
+    let llm = record::llm_block(
+        client.inner().model(),
+        client.inner().endpoint(),
+        cfg.llm.temperature,
+    );
+
+    let parameters = cfg.to_run_config_json(seed);
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "run")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(seed)
+            .llm(llm)
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
 
     println!("=== Mou et al. (2024) HiSim 大規模社会運動シミュレーション 再現実験 ===");
     println!(
@@ -408,30 +448,19 @@ fn cmd_run(args: RunArgs) {
         cfg.network.kind.label(),
     );
     println!(
-        "seed: {:?} | llm-budget: {} | stance: {} | LLM: temp={} llm_seed={} cache={}",
-        cfg.seed,
+        "seed: {} | llm-budget: {} | stance: {} | LLM: temp={} llm_seed={} cache={}",
+        seed,
         cfg.llm_budget,
         cfg.stance.label(),
         cfg.llm.temperature,
         cfg.llm.seed,
         args.cache_path
     );
-    println!("出力先: {}", cfg.output_dir);
+    println!("出力先: {}", rv.dir().display());
     println!("-----------------------------------------------------------------");
 
-    let result = run(&cfg).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
-
-    save_metrics(&result.metrics_history, &cfg.output_dir);
-    save_run_metadata(&result, &cfg, &cfg.output_dir);
-
-    // config.json (pretty-print JSON; socsim_results::write_json に委譲)．
-    {
-        let path = format!("{}/config.json", cfg.output_dir);
-        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
-    }
-
-    // latest シンボリックリンクを再作成する (best-effort; 従来同様エラーは無視)．
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
+    let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+    record::log_simulation(&mut rv, &result);
 
     let last = result.metrics_history.last().unwrap();
     println!(
@@ -450,9 +479,11 @@ fn cmd_run(args: RunArgs) {
         result.metadata.cache_hit_rate() * 100.0,
         result.llm_model,
     );
-    println!("メトリクス → {}/metrics.csv", cfg.output_dir);
-    println!("LLM メタ   → {}/run_metadata.json", cfg.output_dir);
-    println!("設定       → {}/config.json", cfg.output_dir);
+
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("メトリクス → {}/metrics.csv", dir.display());
+    println!("設定       → {}/config.json", dir.display());
+    println!("LLM メタ   → {}/run.json (llm ブロック)", dir.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -474,14 +505,66 @@ fn cmd_sweep(args: SweepArgs) {
         .map(|s| parse_network(s).unwrap_or_else(|e| panic!("{e}")))
         .collect();
 
-    let timestamp = timestamp();
-    let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
-    fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
     if let Some(parent) = Path::new(&args.cache_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
 
     let n_total = core_ratio_values.len() * abm_models.len() * net_kinds.len() * args.runs;
+
+    let llm_settings = LlmSettings {
+        temperature: args.llm_temperature,
+        seed: args.llm_seed,
+        cache_path: Some(args.cache_path.clone()),
+    };
+    // 全条件が同じバックエンドを使うので，`llm` ブロックは 1 度組んで子 run へ配る．
+    // 名乗る名前を知っているのはクライアントだけなので，回す前に 1 つ組んで訊く．
+    let llm = {
+        let probe = build_live_client(&llm_settings)
+            .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"));
+        record::llm_block(
+            probe.inner().model(),
+            probe.inner().endpoint(),
+            llm_settings.temperature,
+        )
+    };
+
+    let sweep_parameters = SweepParameters {
+        dataset: args.dataset.clone(),
+        core_ratio_values: core_ratio_values.clone(),
+        abm_values: abm_models.iter().map(|m| m.label().to_string()).collect(),
+        network_values: net_kinds.iter().map(|n| n.label().to_string()).collect(),
+        n_agents: args.n_agents,
+        steps: args.steps,
+        runs: args.runs,
+        llm_budget: args.llm_budget,
+        seed: args.seed,
+        llm_temperature: args.llm_temperature,
+        llm_seed: args.llm_seed,
+    };
+
+    // 親 run: グリッド定義そのものを parameters に持つ．個別条件の指標は書かない．
+    // 親は 1 本のシミュレーションではないので master_seed を名乗らず，基点シードは
+    // /parameters.seed と seed_pointers 経由で execution_hash に残る．
+    // sweep_id は runvault が親の run_slug で埋める．
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "sweep")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&sweep_parameters)
+            .expect("runvault: sweep の parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .sweep_parent()
+            .llm(llm.clone())
+            .replication(record::replication()),
+    )
+    .expect("runvault: sweep 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: sweep 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== Mou et al. (2024) HiSim パラメータスイープ (core-ratio × abm × network) ===");
     println!(
@@ -493,24 +576,65 @@ fn cmd_sweep(args: SweepArgs) {
         args.runs,
         n_total,
     );
-    println!("出力先: {}", sweep_dir);
+    println!("シード (base): {}", args.seed);
+    println!("出力先: {}", parent.dir().display());
     println!("-----------------------------------------------------------------");
 
-    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
+    // ABM 種別ごとの平均分極化 (最後に出す要約)．試行ごとの値は子 run の
+    // events.jsonl が正本なので，ここでは表示のためだけに積む．
+    let mut polarization_by_abm: Vec<(AbmModel, Vec<f64>)> =
+        abm_models.iter().map(|&m| (m, Vec::new())).collect();
     let mut done = 0usize;
 
     for &net_kind in &net_kinds {
         for &abm_model in &abm_models {
             for &core_ratio in &core_ratio_values {
+                let params = SweepPointParameters {
+                    dataset: args.dataset.clone(),
+                    network: net_kind.label().to_string(),
+                    abm: abm_model.label().to_string(),
+                    core_ratio,
+                    n_agents: args.n_agents,
+                    steps: args.steps,
+                    runs: args.runs,
+                    llm_budget: args.llm_budget,
+                    seed: args.seed,
+                    llm_temperature: args.llm_temperature,
+                    llm_seed: args.llm_seed,
+                };
+
+                // 子は «その条件の試行群» そのもの．master_seed は親と同じ基点で，
+                // 条件が違えば config_hash が違うので run としては別物になる．
+                // 同じ条件の繰り返しは無いので replicate_index は 0．
+                let mut child = Run::start(
+                    RunOptions::new(EXPERIMENT, "sweep-point")
+                        .repo_id(REPO_ID)
+                        .domain(DOMAIN)
+                        .results_root(&args.output_dir)
+                        .parameters(&params)
+                        .expect("runvault: 子 run の parameters の組み立てに失敗")
+                        .seed_pointers(["/seed"])
+                        .master_seed(args.seed)
+                        .replicate_index(0)
+                        .llm(llm.clone())
+                        .lineage(Lineage {
+                            sweep_id: Some(sweep_id.clone()),
+                            parent_run_uid: Some(parent_run_uid.clone()),
+                            ..Default::default()
+                        })
+                        .replication(record::replication()),
+                )
+                .expect("runvault: 子 run の開始に失敗");
+
+                let mut trials: Vec<record::TrialOutcome> = Vec::with_capacity(args.runs);
                 for run_idx in 0..args.runs {
-                    let seed = socsim_core::derive_seed(
+                    // 各 (network, abm, core_ratio, run) に独立なシードを派生させる．
+                    let seed = record::sweep_trial_seed(
                         args.seed,
-                        &[
-                            label_hash(net_kind.label()),
-                            label_hash(abm_model.label()),
-                            (core_ratio * 1000.0) as u64,
-                            run_idx as u64,
-                        ],
+                        net_kind.label(),
+                        abm_model.label(),
+                        core_ratio,
+                        run_idx,
                     );
 
                     let cfg = Config {
@@ -529,39 +653,38 @@ fn cmd_sweep(args: SweepArgs) {
                         mobilization_threshold: 0.5,
                         llm_budget: args.llm_budget,
                         seed: Some(seed),
-                        llm: LlmSettings {
-                            temperature: args.llm_temperature,
-                            seed: args.llm_seed,
-                            cache_path: Some(args.cache_path.clone()),
-                        },
+                        llm: llm_settings.clone(),
                         stance: StanceMode::default(),
-                        output_dir: sweep_dir.clone(),
                     };
 
-                    let result = run(&cfg).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
-                    let last = result.metrics_history.last().unwrap();
+                    let client = build_live_client(&cfg.llm)
+                        .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"));
+                    let result = run_with_client(&cfg, client)
+                        .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
-                    summary_rows.push(SweepRow {
-                        dataset: args.dataset.clone(),
-                        abm: abm_model.label().to_string(),
-                        network: net_kind.label().to_string(),
-                        core_ratio,
-                        n_agents: args.n_agents,
-                        run: run_idx,
+                    // 旧 sweep_summary.csv の 1 行が terminal 行 1 本に対応する．
+                    // metrics.csv に入れると (run_uid, step, scope, name) が重複する．
+                    record::log_trial(
+                        &mut child,
+                        &format!("trial-{run_idx}"),
                         seed,
-                        converged: result.converged,
-                        final_step: result.final_step,
-                        final_macro_bias: last.macro_bias,
-                        final_macro_diversity: last.macro_diversity,
-                        final_mobilized: last.mobilized,
-                        final_polarization: last.polarization,
-                        final_core_influence: last.core_influence,
-                        total_llm_calls: result.metadata.total(),
-                        cache_hit_rate: result.metadata.cache_hit_rate(),
-                    });
+                        args.steps,
+                        &result,
+                    );
+                    let outcome = record::TrialOutcome::from_result(&result);
+                    if let Some((_, values)) = polarization_by_abm
+                        .iter_mut()
+                        .find(|(m, _)| *m == abm_model)
+                    {
+                        values.push(outcome.polarization);
+                    }
+                    trials.push(outcome);
 
                     done += 1;
                 }
+                record::log_condition_summary(&mut child, &trials);
+                child.finish().expect("runvault: 子 run の完了に失敗");
+
                 println!(
                     "[{}/{}] network={} abm={} core-ratio={:.2} 完了 ({} 試行)",
                     done,
@@ -575,50 +698,21 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
-    {
-        let path = format!("{}/sweep_summary.csv", sweep_dir);
-        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
-    }
-
-    // sweep_config.json
-    {
-        let config_json = SweepConfigJson {
-            command: "sweep",
-            dataset: args.dataset.clone(),
-            core_ratio_values: core_ratio_values.clone(),
-            abm_values: abm_models.iter().map(|m| m.label().to_string()).collect(),
-            network_values: net_kinds.iter().map(|n| n.label().to_string()).collect(),
-            n_agents: args.n_agents,
-            steps: args.steps,
-            runs: args.runs,
-            seed: args.seed,
-            llm_temperature: args.llm_temperature,
-            llm_seed: args.llm_seed,
-        };
-        let path = format!("{}/sweep_config.json", sweep_dir);
-        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
-    }
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_sweep", timestamp));
+    let parent_dir = parent.finish().expect("runvault: sweep 親 run の完了に失敗");
 
     println!("=================================================================");
     println!("スイープ完了: {} 実行", n_total);
     println!("ABM 種別別の平均 分極化 polarization:");
-    for &abm_model in &abm_models {
-        let rows: Vec<&SweepRow> = summary_rows
-            .iter()
-            .filter(|r| r.abm == abm_model.label())
-            .collect();
-        if rows.is_empty() {
+    for (abm_model, values) in &polarization_by_abm {
+        if values.is_empty() {
             continue;
         }
-        let avg = rows.iter().map(|r| r.final_polarization).sum::<f64>() / rows.len() as f64;
+        let avg = values.iter().sum::<f64>() / values.len() as f64;
         println!("  abm={:<7} → polarization̄ = {:.4}", abm_model.label(), avg);
     }
     println!("-----------------------------------------------------------------");
-    println!("サマリ → {}/sweep_summary.csv", sweep_dir);
-    println!("設定   → {}/sweep_config.json", sweep_dir);
+    println!("親 run  → {}", parent_dir.display());
+    println!("試行の値 → 各子 run の events.jsonl (terminal 行)");
 }
 
 // ---------------------------------------------------------------------------
@@ -626,17 +720,16 @@ fn cmd_sweep(args: SweepArgs) {
 // ---------------------------------------------------------------------------
 
 /// 1 レジーム (hybrid / pure-abm) × ABM を `runs` 回回した集計セル (Table 3 の元)．
-#[derive(serde::Serialize, Clone)]
+///
+/// 試行ごとの値ではなく試行平均だけを持つ (旧 `reproduce_summary.json` と同じ粒度)．
+#[derive(Clone)]
 struct ReproCell {
-    /// 条件ラベル (例: "hybrid_bc" / "pureabm_lorenz")．
+    /// 条件ラベル (例: "hybrid_bc" / "pureabm_lorenz")．指標名の接頭辞にもなる．
     label: String,
     /// レジーム ("hybrid" = LLM コア + ABM 周辺 / "pure-abm" = core-ratio 0)．
     regime: String,
     /// 周辺 ABM 種別．
     abm: String,
-    /// コア比率 (hybrid は core_ratio，pure-abm は 0.0)．
-    core_ratio: f64,
-    runs: usize,
     /// 試行平均の最終 macro_bias (集団態度の偏り; Table 3 Bias)．
     mean_final_bias: f64,
     /// 試行平均の最終 macro_diversity (意見多様性; Table 3 Div.)．
@@ -651,18 +744,66 @@ struct ReproCell {
     mean_llm_calls: f64,
 }
 
-/// 観測値と論文の定性的知見を突き合わせた 1 アンカー．
-#[derive(serde::Serialize)]
+impl ReproCell {
+    /// run スコープ指標として書く値の並び (接頭辞は [`ReproCell::label`])．
+    fn metrics(&self) -> [(&'static str, f64); 6] {
+        [
+            ("mean_final_bias", self.mean_final_bias),
+            ("mean_final_diversity", self.mean_final_diversity),
+            ("mean_final_polarization", self.mean_final_polarization),
+            ("mean_final_mobilization", self.mean_final_mobilization),
+            ("mean_mobilization_gain", self.mean_mobilization_gain),
+            ("mean_llm_calls", self.mean_llm_calls),
+        ]
+    }
+}
+
+/// 観測値と論文の定性的知見を突き合わせた 1 アンカー (`events.jsonl` へ書く)．
+///
+/// `name` は runvault の指標名にもなるので slug (小文字・数字・`_`・`-`・`.`) に
+/// 収める．比較の向きは名前の中に `_ge_` のように織り込み，帯そのものは
+/// `target_lo` / `target_hi` が持つ．
+#[derive(Serialize)]
 struct ReproAnchor {
     name: String,
     paper: String,
     observed: f64,
     target_lo: f64,
-    target_hi: f64,
+    /// 帯の上限．上限なしは `None`．
+    ///
+    /// `f64::INFINITY` は JSON で表現できず `null` に潰れるので，«上限が無い» と
+    /// «値を書き忘れた» が区別できなくなる．最初から `Option` で持つ．
+    target_hi: Option<f64>,
     pass: bool,
 }
 
-/// 1 レジーム × ABM を `runs` 回実行して集計セルを作る (代表 run の履歴を CSV 保存)．
+/// SoMoSiMu-Bench の整合判定 1 行 (`events.jsonl` へ書く)．
+///
+/// [`hisim_simulation::bench::AlignmentRow`] に，どの運動のどの参照との比較かを
+/// 添えたもの．参照値はこの再現実装が置いた合成アンカーであって論文の報告値では
+/// ないので，出典を要求する `reference.csv` ではなくここに置く．
+#[derive(Serialize)]
+struct BenchAlignmentEvent<'a> {
+    movement: &'a str,
+    reference_source: &'a str,
+    metric: &'a str,
+    observed: f64,
+    reference: f64,
+    abs_error: f64,
+    tolerance: f64,
+    aligned: bool,
+}
+
+/// 1 セルの実行結果 (集計セル・bench 用の運動指標・代表 run の履歴)．
+struct ReproCellResult {
+    cell: ReproCell,
+    /// 試行ごとの運動指標 (bench 照合の観測系列の材料)．
+    movement_runs: Vec<MovementMetrics>,
+    /// 代表 run (run 0) のステップごとの履歴．
+    representative: Vec<StepMetrics>,
+}
+
+/// 1 レジーム × ABM を `runs` 回実行して集計セルを作る．
 #[allow(clippy::too_many_arguments)]
 fn run_repro_cell(
     label: &str,
@@ -678,8 +819,7 @@ fn run_repro_cell(
     root_seed: u64,
     mock: bool,
     llm: &LlmSettings,
-    out_dir: &str,
-) -> (ReproCell, Vec<MovementMetrics>) {
+) -> ReproCellResult {
     let mut final_bias = 0.0;
     let mut final_div = 0.0;
     let mut final_pol = 0.0;
@@ -687,18 +827,11 @@ fn run_repro_cell(
     let mut mob_gain = 0.0;
     let mut llm_calls = 0.0;
     let mut movement_runs: Vec<MovementMetrics> = Vec::with_capacity(runs);
-    let mut representative: Option<Vec<hisim_simulation::metrics::StepMetrics>> = None;
+    let mut representative: Vec<StepMetrics> = Vec::new();
 
     for run_idx in 0..runs {
-        let seed = socsim_core::derive_seed(
-            root_seed,
-            &[
-                label_hash(regime),
-                label_hash(abm_model.label()),
-                label_hash(dataset),
-                run_idx as u64,
-            ],
-        );
+        let seed =
+            record::repro_trial_seed(root_seed, regime, abm_model.label(), dataset, run_idx);
         let cfg = Config {
             dataset: dataset.to_string(),
             n_agents,
@@ -717,19 +850,17 @@ fn run_repro_cell(
             seed: Some(seed),
             llm: llm.clone(),
             stance,
-            output_dir: out_dir.to_string(),
         };
 
         // pure-abm (core_ratio 0) は LLM を一切呼ばないので mock も live も不要．
-        let result: SimulationResult = if core_ratio == 0.0 {
-            run_with_client(&cfg, build_reproduce_client())
-                .unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"))
-        } else if mock {
-            run_with_client(&cfg, build_reproduce_client())
-                .unwrap_or_else(|e| panic!("mock 実行に失敗 ({label}): {e}"))
+        let client: HiSimClient = if core_ratio == 0.0 || mock {
+            build_reproduce_client()
         } else {
-            run(&cfg).unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"))
+            build_live_client(&cfg.llm)
+                .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗 ({label}): {e}"))
         };
+        let result: SimulationResult = run_with_client(&cfg, client)
+            .unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"));
 
         let first = result.metrics_history.first().unwrap();
         let last = result.metrics_history.last().unwrap();
@@ -745,22 +876,8 @@ fn run_repro_cell(
             n_agents,
         ));
         if run_idx == 0 {
-            representative = Some(result.metrics_history.clone());
+            representative = result.metrics_history.clone();
         }
-    }
-
-    if let Some(hist) = representative {
-        // 代表 run (run 0) の long-format メトリクスを条件別名で書き出す
-        // (Python 側で時系列描画に使う; save_metrics は metrics.csv 固定名なので使わない)．
-        let path = format!("{out_dir}/metrics_{label}.csv");
-        let file = std::fs::File::create(&path).expect("metrics_<label>.csv の作成に失敗");
-        let mut wtr = csv::Writer::from_writer(std::io::BufWriter::new(file));
-        for m in &hist {
-            for row in m.to_rows() {
-                wtr.serialize(row).expect("メトリクス行の書き込みに失敗");
-            }
-        }
-        wtr.flush().expect("フラッシュに失敗");
     }
 
     let n = runs.max(1) as f64;
@@ -768,8 +885,6 @@ fn run_repro_cell(
         label: label.to_string(),
         regime: regime.to_string(),
         abm: abm_model.label().to_string(),
-        core_ratio,
-        runs,
         mean_final_bias: final_bias / n,
         mean_final_diversity: final_div / n,
         mean_final_polarization: final_pol / n,
@@ -777,7 +892,11 @@ fn run_repro_cell(
         mean_mobilization_gain: mob_gain / n,
         mean_llm_calls: llm_calls / n,
     };
-    (cell, movement_runs)
+    ReproCellResult {
+        cell,
+        movement_runs,
+        representative,
+    }
 }
 
 /// 複数 run の運動指標を平均する (bench 照合の観測値)．
@@ -809,6 +928,18 @@ fn mean_movement(runs: &[MovementMetrics]) -> MovementMetrics {
     acc
 }
 
+/// 運動指標を run スコープ指標の並びへ落とす．
+fn movement_metrics(m: &MovementMetrics) -> [(&'static str, f64); 6] {
+    [
+        ("mobilization_peak", m.mobilization_peak),
+        ("peak_step", m.peak_step as f64),
+        ("final_mobilization", m.final_mobilization),
+        ("final_bias", m.final_bias),
+        ("final_polarization", m.final_polarization),
+        ("sustain_ratio", m.sustain_ratio),
+    ]
+}
+
 fn cmd_reproduce(args: ReproduceArgs) {
     let datasets = split_csv(&args.datasets);
     let abm_models: Vec<AbmModel> = split_csv(&args.abm_values)
@@ -823,9 +954,6 @@ fn cmd_reproduce(args: ReproduceArgs) {
     let runs = if args.quick { 2 } else { args.runs };
     let steps = if args.quick { 8 } else { args.steps };
 
-    let ts = timestamp();
-    let out_dir = format!("{}/reproduce_{}", args.output_dir, ts);
-    ensure_output_dir(&out_dir);
     if !args.mock {
         if let Some(parent) = Path::new(&args.cache_path).parent() {
             let _ = fs::create_dir_all(parent);
@@ -842,6 +970,49 @@ fn cmd_reproduce(args: ReproduceArgs) {
         },
     };
 
+    // 名乗る名前を知っているのはクライアントだけなので，回す前に 1 つ組んで訊く．
+    // `--mock` なら scripted mock が，live ならフォールバッククライアントが答える
+    // (live でも pure-abm セルは LLM を 1 度も呼ばないが，ハイブリッドセルが呼ぶ
+    // のはこのバックエンドである)．
+    let llm_block = {
+        let probe: HiSimClient = if args.mock {
+            build_reproduce_client()
+        } else {
+            build_live_client(&llm)
+                .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"))
+        };
+        record::llm_block(probe.inner().model(), probe.inner().endpoint(), llm.temperature)
+    };
+
+    let parameters = ReproduceParameters {
+        datasets: datasets.clone(),
+        abm_values: abm_models.iter().map(|m| m.label().to_string()).collect(),
+        core_ratio: args.core_ratio,
+        n_agents,
+        steps,
+        runs,
+        network: net_kind.label().to_string(),
+        stance: stance.label().to_string(),
+        mock: args.mock,
+        seed: args.seed,
+        llm_temperature: args.llm_temperature,
+        llm_seed: args.llm_seed,
+    };
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "reproduce")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(args.seed)
+            .llm(llm_block)
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
+
     println!("=== Mou et al. (2024) HiSim — Table 2/3 + SoMoSiMu-Bench 一括再現 ===");
     println!(
         "datasets: {} | abm: {} 種 | N: {} | T: {} | runs: {} | network: {} | stance: {} | mode: {}",
@@ -854,7 +1025,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
         stance.label(),
         if args.mock { "MOCK" } else { "LIVE" },
     );
-    println!("出力先: {out_dir}");
+    println!("出力先: {}", rv.dir().display());
     println!("-----------------------------------------------------------------");
 
     // --- Table 3: hybrid vs pure-abm の ABM 別行列 (代表 dataset = 先頭) ---
@@ -864,11 +1035,10 @@ fn cmd_reproduce(args: ReproduceArgs) {
         .cloned()
         .unwrap_or_else(|| "metoo".to_string());
     let mut table3_cells: Vec<ReproCell> = Vec::new();
-    // bench 照合用に «pure-abm BC» の運動指標を dataset ごとに集める．
     for &abm_model in &abm_models {
         for &(regime, ratio) in &[("pure-abm", 0.0), ("hybrid", args.core_ratio)] {
             let label = format!("{}_{}", regime.replace('-', ""), abm_model.label());
-            let (cell, _runs) = run_repro_cell(
+            let out = run_repro_cell(
                 &label,
                 regime,
                 abm_model,
@@ -882,25 +1052,58 @@ fn cmd_reproduce(args: ReproduceArgs) {
                 args.seed,
                 args.mock,
                 &llm,
-                &out_dir,
             );
-            table3_cells.push(cell);
+            // 11 条件が 1 本の run に同居するので，(step, scope, name) が衝突しない
+            // よう条件ラベルを名前に付ける．
+            record::log_history(&mut rv, Some(&label), &out.representative);
+            record::log_prefixed(&mut rv, &label, &out.cell.metrics());
+            table3_cells.push(out.cell);
         }
     }
 
     // --- Table 2: SoMoSiMu-Bench 照合 (dataset 別; pure-abm BC を観測系列とする) ---
-    // 純 ABM の動員ダイナミクスを各運動の較正済み合成参照と照合する (オフライン経路)．
+    // 純 ABM の動員ダイナミクスを各運動の合成参照と照合する (オフライン経路)．
     let bench_abm = AbmModel::Bc;
     let mut bench_comparisons: Vec<hisim_simulation::bench::BenchComparison> = Vec::new();
     for ds in &datasets {
         let label = format!("bench_{ds}");
-        let (_cell, movement_runs) = run_repro_cell(
+        let out = run_repro_cell(
             &label, "pure-abm", bench_abm, 0.0, net_kind, ds, n_agents, steps, stance, runs,
-            args.seed, args.mock, &llm, &out_dir,
+            args.seed, args.mock, &llm,
         );
-        let observed = mean_movement(&movement_runs);
+        record::log_history(&mut rv, Some(&label), &out.representative);
+
+        let observed = mean_movement(&out.movement_runs);
+        record::log_prefixed(&mut rv, &label, &movement_metrics(&observed));
+
         let reference = reference_curve(ds, steps);
-        bench_comparisons.push(compare_to_bench(ds, observed, &reference));
+        let comparison = compare_to_bench(ds, observed, &reference);
+        record::log_prefixed(
+            &mut rv,
+            &label,
+            &[
+                ("n_aligned", comparison.n_aligned as f64),
+                ("n_total", comparison.n_total as f64),
+            ],
+        );
+        for row in &comparison.rows {
+            record::log_verdict(
+                &mut rv,
+                BENCH_EVENT,
+                &row.metric,
+                &BenchAlignmentEvent {
+                    movement: &comparison.movement,
+                    reference_source: &comparison.reference_source,
+                    metric: &row.metric,
+                    observed: row.observed,
+                    reference: row.reference,
+                    abs_error: row.abs_error,
+                    tolerance: row.tolerance,
+                    aligned: row.aligned,
+                },
+            );
+        }
+        bench_comparisons.push(comparison);
     }
 
     // --- アンカー評価 (論文 Table 2/3 の定性的知見) ---
@@ -917,14 +1120,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
     let hk_pure = cell("pure-abm", "hk");
 
     let mut anchors: Vec<ReproAnchor> = Vec::new();
-    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: f64| {
+    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: Option<f64>| {
         anchors.push(ReproAnchor {
             name: name.to_string(),
             paper: paper.to_string(),
             observed: obs,
             target_lo: lo,
             target_hi: hi,
-            pass: obs >= lo && obs <= hi,
+            pass: obs >= lo && hi.is_none_or(|h| obs <= h),
         });
     };
 
@@ -934,22 +1137,22 @@ fn cmd_reproduce(args: ReproduceArgs) {
         "core-ratio 0 = no LLM",
         bc_pure.mean_llm_calls,
         0.0,
-        0.0,
+        Some(0.0),
     );
     // T3-B: 二極化の順序 BC ≤ {SJ, Lorenz} (論文 §A: BC/HK は合意，SJ/Lorenz は分極)．
     push(
-        "polarization_lorenz>=bc",
+        "polarization_lorenz_ge_bc",
         "Lorenz polarizes vs BC consensus",
         lorenz_pure.mean_final_polarization - bc_pure.mean_final_polarization,
         -1e-9,
-        f64::INFINITY,
+        None,
     );
     push(
-        "polarization_sj>=bc",
+        "polarization_sj_ge_bc",
         "SJ polarizes vs BC consensus",
         sj_pure.mean_final_polarization - bc_pure.mean_final_polarization,
         -1e-9,
-        f64::INFINITY,
+        None,
     );
     // T3-C: BC/HK は合意寄り (低分極; 分極 < 0.5)．
     push(
@@ -957,28 +1160,48 @@ fn cmd_reproduce(args: ReproduceArgs) {
         "BC reaches consensus (low polarization)",
         bc_pure.mean_final_polarization,
         0.0,
-        0.5,
+        Some(0.5),
     );
     push(
         "hk_low_polarization",
         "HK reaches consensus (low polarization)",
         hk_pure.mean_final_polarization,
         0.0,
-        0.5,
+        Some(0.5),
     );
     // T3-D: ハイブリッド (LLM コア) は純 ABM より動員を牽引する
     //   (mock では支持コアが call-to-action を発信 → 動員の伸びが純 ABM 以上)．
     push(
-        "hybrid_amplifies_mobilization (gain_hybrid - gain_pureabm >= 0)",
-        "core LLM drives mobilization",
+        "hybrid_amplifies_mobilization",
+        "core LLM drives mobilization (gain_hybrid - gain_pureabm >= 0)",
         bc_hybrid.mean_mobilization_gain - bc_pure.mean_mobilization_gain,
         -1e-9,
-        f64::INFINITY,
+        None,
     );
 
-    // bench アンカー: 各運動で過半数の指標が整合帯に入る．
+    // 観測量そのものは run 全体を 1 つの値で表す数なので指標に書く．判定 (PASS/off)
+    // と帯はカテゴリ・自前のアンカーなので events.jsonl へ．
+    let observed: Vec<(&str, f64)> = anchors
+        .iter()
+        .map(|a| (a.name.as_str(), a.observed))
+        .collect();
+    record::log_scoped(&mut rv, &observed);
+    for a in &anchors {
+        record::log_verdict(&mut rv, ANCHOR_EVENT, &a.name, a);
+    }
+
     let bench_total: usize = bench_comparisons.iter().map(|c| c.n_total).sum();
     let bench_aligned: usize = bench_comparisons.iter().map(|c| c.n_aligned).sum();
+    let n_pass = anchors.iter().filter(|a| a.pass).count();
+    record::log_scoped(
+        &mut rv,
+        &[
+            ("anchors_passed", n_pass as f64),
+            ("anchors_total", anchors.len() as f64),
+            ("bench_aligned", bench_aligned as f64),
+            ("bench_total", bench_total as f64),
+        ],
+    );
 
     // --- コンソール出力 ---
     println!("--- Table 3: hybrid vs pure-abm (dataset={table3_dataset}) ---");
@@ -998,7 +1221,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
             c.mean_llm_calls,
         );
     }
-    println!("--- Table 2: SoMoSiMu-Bench 照合 (pure-abm BC; 較正済み合成参照) ---");
+    println!("--- Table 2: SoMoSiMu-Bench 照合 (pure-abm BC; 合成参照) ---");
     for c in &bench_comparisons {
         println!(
             "  {:<6} [{}] {}/{} 指標が整合 (source={})",
@@ -1026,13 +1249,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
     }
     println!("--- 論文知見アンカー (Table 2/3) ---");
     for a in &anchors {
-        let hi = if a.target_hi.is_infinite() {
-            "∞".to_string()
-        } else {
-            format!("{:.3}", a.target_hi)
+        let hi = match a.target_hi {
+            Some(h) => format!("{h:.3}"),
+            None => "∞".to_string(),
         };
         println!(
-            "[{}] {:<58} obs={:.4} target=[{:.3},{}]",
+            "[{}] {:<32} obs={:.4} target=[{:.3},{}]",
             if a.pass { "PASS" } else { "OFF " },
             a.name,
             a.observed,
@@ -1040,40 +1262,13 @@ fn cmd_reproduce(args: ReproduceArgs) {
             hi,
         );
     }
-    let n_pass = anchors.iter().filter(|a| a.pass).count();
     println!("-----------------------------------------------------------------");
     println!("{}/{} アンカーが in-band", n_pass, anchors.len());
     println!("{}/{} bench 指標が整合帯", bench_aligned, bench_total);
 
-    // --- reproduce_summary.json ---
-    let summary = serde_json::json!({
-        "timestamp": ts,
-        "mode": if args.mock { "mock" } else { "live" },
-        "config": {
-            "datasets": datasets,
-            "abm_values": abm_models.iter().map(|m| m.label()).collect::<Vec<_>>(),
-            "core_ratio": args.core_ratio,
-            "n_agents": n_agents,
-            "steps": steps,
-            "runs": runs,
-            "network": net_kind.label(),
-            "stance": stance.label(),
-            "seed": args.seed,
-        },
-        "table3_hybrid_vs_pureabm": table3_cells,
-        "table3_dataset": table3_dataset,
-        "bench_comparisons": bench_comparisons,
-        "bench_aligned": bench_aligned,
-        "bench_total": bench_total,
-        "anchors": anchors,
-        "n_pass": n_pass,
-        "n_total": anchors.len(),
-    });
-    let path = format!("{out_dir}/reproduce_summary.json");
-    write_json(&summary, &path).expect("reproduce_summary.json の書き込みに失敗");
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("reproduce_{ts}"));
-    println!("サマリ → {path}");
-    println!("条件別メトリクス → {out_dir}/metrics_<condition>.csv");
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("条件別メトリクス → {}/metrics.csv", dir.display());
+    println!("判定 (アンカー・bench) → {}/events.jsonl", dir.display());
 }
 
 // ---------------------------------------------------------------------------

@@ -2,16 +2,21 @@
 """
 visualize_sweep.py — Mou et al. (2024) HiSim スイープ結果 可視化スクリプト
 
-results/{ts}_sweep/sweep_summary.csv を読み，コア比率・ネットワーク構造・ABM
-モデルが最終マクロ指標 (分極化・動員・多様性・コア影響) に与える依存を可視化する．
+sweep 親 run の子 run を集めて «1 行 1 試行» の表を組み直し (`sweep_summary` モジュール)，
+コア比率・ネットワーク構造・ABM モデルが最終マクロ指標 (分極化・動員・多様性・コア影響)
+に与える依存を可視化する．
 
 (1) コア比率依存: core-ratio → 最終 polarization / mobilized (ABM 種別ごと)
 (2) ABM モデル別の最終分極化 (棒グラフ)
 (3) ネットワーク構造別の最終コア影響 (BA がコア影響を増幅するか)
 
+--results_dir を省略すると
+`runvault path --experiment hisim --latest --subcommand sweep`
+が返す sweep 親の run ディレクトリを対象にする (`runvault` が PATH にある必要がある)．
+
 Usage:
     uv run hisim-tools visualize-sweep
-    uv run hisim-tools visualize-sweep --results_dir results/20260525_103000_sweep
+    uv run hisim-tools visualize-sweep --results_dir "$(runvault path --experiment hisim --latest --subcommand sweep)"
 
 Outputs:
     output_dir/
@@ -25,6 +30,12 @@ import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from runvault.read import figures_dir, runvault_path
+
+from hisim_tools.sweep_summary import sweep_summary_table
+
+# runvault の experiment 名 (Rust 側 record::EXPERIMENT と揃える)．
+EXPERIMENT = "hisim"
 
 plt.rcParams["font.family"] = "Hiragino Sans"
 
@@ -33,10 +44,8 @@ PALETTE = ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0", "#00BCD4"]
 
 
 def load_summary(results_dir: str) -> pd.DataFrame:
-    path = os.path.join(results_dir, "sweep_summary.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"sweep_summary.csv が見つかりません: {path}")
-    return pd.read_csv(path)
+    """1 行 1 試行の表．runvault の run からも legacy の CSV からも読める．"""
+    return sweep_summary_table(results_dir)
 
 
 def save_sweep_dependence(df: pd.DataFrame, out_path: str) -> None:
@@ -93,29 +102,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results_dir",
         "--results-dir",
-        default="results/latest",
-        help="sweep 出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="sweep 親の run ディレクトリ (省略時は runvault path --latest --subcommand sweep)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="runvault の results ルート (default: results)",
+    )
+    p.add_argument(
+        "--experiment",
+        default=EXPERIMENT,
+        help=f"runvault の experiment 名 (default: {EXPERIMENT})",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先 (default: {results_dir}/figures)",
+        help="図の保存先 (default: <experiment>/figures/<run_slug>)",
     )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.results_dir, "figures")
+    results_dir = args.results_dir or runvault_path(
+        args.experiment, args.results_root, subcommand="sweep"
+    )
+    out_dir = args.output_dir if args.output_dir else figures_dir(results_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Mou et al. (2024) HiSim スイープ結果 可視化 ===")
-    print(f"結果:   {args.results_dir}")
+    print(f"結果:   {results_dir}")
     print(f"出力先: {out_dir}")
     print("-----------------------------------------")
 
-    df = load_summary(args.results_dir)
+    df = load_summary(results_dir)
     print(f"[1/1] 依存図を保存中 ... ({len(df)} 行)")
     save_sweep_dependence(df, os.path.join(out_dir, "sweep_dependence.png"))
 

@@ -48,7 +48,6 @@ fn base_config(core_ratio: f64, model: AbmModel) -> Config {
         seed: Some(7),
         llm: LlmSettings::default(),
         stance: hisim_simulation::config::StanceMode::default(),
-        output_dir: "results".to_string(),
     }
 }
 

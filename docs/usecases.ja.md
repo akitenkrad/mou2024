@@ -4,7 +4,7 @@
 
 ## 1. 純粋 ABM ベースライン (LLM なし)
 
-論文の決定論的較正パス．LLM は一切呼ばれない．
+論文の決定論的なパラメータ調整パス．LLM は一切呼ばれない．
 
 ```bash
 cargo run --release -- run --dataset metoo --abm bc --core-ratio 0.0 \
@@ -64,7 +64,7 @@ cargo run --release -- reproduce --mock --seed 42
 uv run hisim-tools reproduce --run --mock
 ```
 
-`reproduce_summary.json` は観測 vs 論文のアンカー (純 ABM = LLM 0 呼び出し; Lorenz/SJ は BC より分極; BC/HK は合意; LLM コアが動員を増幅) と運動別 bench 照合を PASS/off 帯付きで記録する．bench 参照は **較正済み合成**曲線である — 生 SoMoSiMu-Bench データは同梱しないため，比較は数値完全一致ではなく定性傾向を見る．
+`events.jsonl` は観測 vs 論文のアンカー (純 ABM = LLM 0 呼び出し; Lorenz/SJ は BC より分極; BC/HK は合意; LLM コアが動員を増幅) と運動別 bench 照合を PASS/off 帯付きで記録する．bench 参照は **合成**曲線である — 生 SoMoSiMu-Bench データは同梱しないため，比較は数値完全一致ではなく定性傾向を見る．
 
 ## 6. 外部 LLM stance 注釈
 

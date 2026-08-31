@@ -15,11 +15,11 @@ LLM の出力は socsim の bit 再現性の **外側** にある．したがっ
 - **決定論的 socsim コア** — 網生成 (BA / WS / ER)・階層割当 (高次数ノードがコアに)・一般層 ABM 意見力学 (ステップ開始時の態度スナップショットからの同期更新)・スケジューラ・指標．seed を与えれば bit 単位で再現する．
 - **非決定的 LLM レイヤ** — コア層の行動選択．`socsim-llm` の `CachingClient` (`hash(prompt+model)` → 応答キャッシュ)・`temperature=0`・固定 seed で擬似決定論化する．プロバイダ順は `socsim-llm` の `FallbackClient` により **Ollama 第一 → OpenAI フォールバック**．
 
-再現性を担うのはモデルではなく**キャッシュ**である: ウォームキャッシュは同一応答を再生するため，再実行はコスト 0 で安定する．各実行は `run_metadata.json` にプロバイダ・モデル・endpoint・温度・seed・core-ratio・cache-hit 率を記録する．ローカル既定モデル (`llama3.2:latest`) は論文の GPT-3.5 と異なるため，再現目標は**定性的** (傾向と符号: ハイブリッドが純粋 ABM のトレンドを補正・BC/HK は合意へ収束・SJ/Lorenz は二極化・BA はコア影響を増幅) であり，論文の数値完全一致は狙わない．
+再現性を担うのはモデルではなく**キャッシュ**である: ウォームキャッシュは同一応答を再生するため，再実行はコスト 0 で安定する．各実行はプロバイダ・モデル・温度を runvault の `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率を `metrics.csv` の run スコープ指標に記録する．ローカル既定モデル (`llama3.2:latest`) は論文の GPT-3.5 と異なるため，再現目標は**定性的** (傾向と符号: ハイブリッドが純粋 ABM のトレンドを補正・BC/HK は合意へ収束・SJ/Lorenz は二極化・BA はコア影響を増幅) であり，論文の数値完全一致は狙わない．
 
 ## 2 階層ハイブリッド
 
-HiSim の核心は **規模** (数百万ユーザ) と **忠実度** (LLM の豊かな挙動) の両立である．数千の LLM を回すのは非現実的なので，影響力のある少数 = **コア** のみを LLM 駆動とし，沈黙する多数派 = **一般** 層は軽量な決定論的 ABM で近似する．これはソーシャルメディアのエンゲージメントが従う Pareto 分布 (少数のアクティブユーザが大半のコンテンツを生む) と整合する．較正は論文に倣い，純粋 ABM (`--core-ratio 0.0`) パスで ABM パラメータを調整してからハイブリッドへ適用する (較正中に数百回の LLM 呼び出しを回避)．
+HiSim の核心は **規模** (数百万ユーザ) と **忠実度** (LLM の豊かな挙動) の両立である．数千の LLM を回すのは非現実的なので，影響力のある少数 = **コア** のみを LLM 駆動とし，沈黙する多数派 = **一般** 層は軽量な決定論的 ABM で近似する．これはソーシャルメディアのエンゲージメントが従う Pareto 分布 (少数のアクティブユーザが大半のコンテンツを生む) と整合する．パラメータ調整は論文に倣い，純粋 ABM (`--core-ratio 0.0`) パスで ABM パラメータを合わせてからハイブリッドへ適用する (調整中に数百回の LLM 呼び出しを回避)．
 
 ## インストールとクイックスタート
 
@@ -60,7 +60,7 @@ OLLAMA_MODEL=llama3.2:latest cargo run --release -- run \
 uv sync
 uv run hisim-tools visualize
 uv run hisim-tools visualize-sweep
-uv run hisim-tools show-experiment-settings --results-dir results/latest
+uv run hisim-tools show-experiment-settings
 uv run hisim-tools reproduce --run --mock          # reproduce レポート + 図，オフライン
 
 # === オフライン (LLM 不要) スモーク: scripted mock 経由でハイブリッド経路を実行 ===
@@ -69,15 +69,11 @@ cargo run --release --example mock_smoke -- results
 
 ## 出力
 
-各 `run` は `results/{timestamp}/` (および `latest` シンボリックリンク) に書き出す:
+出力の置き場と同一性は [runvault](https://github.com/akitenkrad/rs-runvault) が持つ．サブコマンド 1 回が run 1 本で，run ディレクトリが出力先そのものなので，タイムスタンプ付きサブディレクトリも `latest` シンボリックリンクも作らない．直近の完了 run のパスは `runvault path --experiment hisim --latest` で取れる．
 
-- `metrics.csv` — long-format `t, metric, value`．`macro_bias` (平均態度)・`macro_diversity` (分散)・`mobilized` (しきい値超過数)・`polarization` (双峰度)・`core_influence` (コア層平均態度)・`llm_actions`．
-- `config.json` — 解決済みの実行設定．
-- `run_metadata.json` — LLM プロバイダ / モデル / endpoint / 温度 / seed / core-ratio / cache-hit 率．
-
-各 `sweep` は `results/{timestamp}_sweep/` に `sweep_summary.csv` と `sweep_config.json` を書き出す．
-
-各 `reproduce` は `results/reproduce_{timestamp}/` に `reproduce_summary.json` (Table 3 の hybrid vs 純 ABM 行列・SoMoSiMu-Bench 照合・観測 vs 論文のアンカーと PASS/off 帯)・条件別 `metrics_<label>.csv` を書き出し，`hisim-tools reproduce` 経由で `figures/{table3_hybrid_vs_pureabm,bench_alignment,mobilization_curves}.png` を生成する．SoMoSiMu-Bench 参照は **較正済み合成**曲線であり生ベンチマークデータではない ([アーキテクチャ](docs/architecture.ja.md) 参照)．
+- `run` — `metrics.csv` の long 形式に，ステップごとの 6 指標 (`macro_bias` (平均態度)・`macro_diversity` (分散)・`mobilized` (しきい値超過数)・`polarization` (双峰度)・`core_influence` (コア層平均態度)・`llm_actions`) を `step_unit=step` で，run 全体を 1 つの値で表す `converged` / `final_step` / `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate` を `step` 無しで書く．実験条件は `config.json` の `parameters`，LLM のモデル・provider・温度は `run.json` の `llm` ブロックにある．
+- `sweep` — 親 run 1 本 + 条件 (network × abm × core-ratio) ごとの子 run (`sweep-point`)．試行 1 本ごとの最終値は子の `events.jsonl` の `terminal` 行で，条件の集約は子の run スコープ指標である (1 行 1 試行のサマリ CSV は書かない)．
+- `reproduce` — 1 本の run に 11 条件が同居する．条件ごとの代表 run のステップ別系列と試行平均は `<条件ラベル>_<指標名>` という名前で `metrics.csv` に，論文知見アンカーの PASS/off と SoMoSiMu-Bench の整合判定は `events.jsonl` (`x.mou2024.anchor` / `x.mou2024.bench_alignment`) にある．図は `hisim-tools reproduce` が `hisim/figures/<run_slug>/{table3_hybrid_vs_pureabm,bench_alignment,mobilization_curves}.png` に書く．SoMoSiMu-Bench 参照は **合成**曲線であり生ベンチマークデータではない ([アーキテクチャ](docs/architecture.ja.md) 参照)．
 
 ## ドキュメント
 

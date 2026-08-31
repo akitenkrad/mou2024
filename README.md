@@ -15,7 +15,7 @@ LLM output is **outside** socsim's bit-reproducibility. The design therefore spl
 - **Deterministic socsim core** — network generation (BA / WS / ER), tier assignment (top-degree nodes become core), the ordinary-tier ABM opinion dynamics (synchronous update from a start-of-step attitude snapshot), the scheduler and the metrics. Given a seed this reproduces bit-for-bit.
 - **Non-deterministic LLM layer** — the core tier's action choice. Pseudo-determinised by `socsim-llm`'s `CachingClient` (a `hash(prompt+model)` → response cache), `temperature=0` and a fixed seed. The provider order is **Ollama first → OpenAI fallback** via `socsim-llm`'s `FallbackClient`.
 
-The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. Each run writes `run_metadata.json` recording the provider, model, endpoint, temperature, seed, core-ratio and cache-hit rate. Because the local default model (`llama3.2:latest`) differs from the paper's GPT-3.5, reproduction targets are **qualitative** (trends and signs: the hybrid corrects the pure-ABM trend, BC/HK converge toward consensus, SJ/Lorenz polarize, BA amplifies core influence), not the paper's exact numbers.
+The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. Each run records the provider, model and temperature in the `llm` block of runvault's `run.json`, and the call count and cache-hit rate as run-scope metrics in `metrics.csv`. Because the local default model (`llama3.2:latest`) differs from the paper's GPT-3.5, reproduction targets are **qualitative** (trends and signs: the hybrid corrects the pure-ABM trend, BC/HK converge toward consensus, SJ/Lorenz polarize, BA amplifies core influence), not the paper's exact numbers.
 
 ## The two-tier hybrid
 
@@ -60,7 +60,7 @@ OLLAMA_MODEL=llama3.2:latest cargo run --release -- run \
 uv sync
 uv run hisim-tools visualize
 uv run hisim-tools visualize-sweep
-uv run hisim-tools show-experiment-settings --results-dir results/latest
+uv run hisim-tools show-experiment-settings
 uv run hisim-tools reproduce --run --mock          # reproduce report + figures, offline
 
 # === Offline (no live LLM) smoke: hybrid path via a scripted mock client ===
@@ -69,15 +69,11 @@ cargo run --release --example mock_smoke -- results
 
 ## Output
 
-Each `run` writes to `results/{timestamp}/` (with a `latest` symlink):
+[runvault](https://github.com/akitenkrad/rs-runvault) owns where output goes and how it is named. One subcommand invocation is one run, and the run directory *is* the output directory, so there is no timestamped subdirectory and no `latest` symlink. `runvault path --experiment hisim --latest` prints the most recent finished run.
 
-- `metrics.csv` — long-format `t, metric, value` for `macro_bias` (mean attitude), `macro_diversity` (variance), `mobilized` (count past threshold), `polarization` (bimodality), `core_influence` (core-tier mean attitude), `llm_actions`.
-- `config.json` — the resolved run configuration.
-- `run_metadata.json` — LLM provider / model / endpoint / temperature / seed / core-ratio / cache-hit rate.
-
-Each `sweep` writes `results/{timestamp}_sweep/` with `sweep_summary.csv` and `sweep_config.json`.
-
-Each `reproduce` writes `results/reproduce_{timestamp}/` with `reproduce_summary.json` (the Table 3 hybrid-vs-pure-ABM matrix, the SoMoSiMu-Bench alignment, and observed-vs-paper anchors with PASS/off bands), per-condition `metrics_<label>.csv`, and — via `hisim-tools reproduce` — `figures/{table3_hybrid_vs_pureabm,bench_alignment,mobilization_curves}.png`. The SoMoSiMu-Bench reference is a **calibrated synthetic** curve, not the raw benchmark dataset (see [Architecture](docs/architecture.md)).
+- `run` — `metrics.csv` in long form: the six per-step metrics (`macro_bias` (mean attitude), `macro_diversity` (variance), `mobilized` (count past threshold), `polarization` (bimodality), `core_influence` (core-tier mean attitude), `llm_actions`) carry a `step` with `step_unit=step`; `converged` / `final_step` / `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate` describe the whole run with one number each and carry no step. The conditions live under `parameters` in `config.json`, and the LLM model / provider / temperature in the `llm` block of `run.json`.
+- `sweep` — one parent run plus one child run (`sweep-point`) per condition (network × abm × core-ratio). Each trial's final values are a `terminal` line in the child's `events.jsonl`, and the condition's aggregate is in the child's run-scope metrics. No per-trial summary CSV is written.
+- `reproduce` — eleven conditions share one run, so their series are named `<condition>_<metric>` in `metrics.csv` (the representative run's per-step series and the per-condition trial means). The PASS/off verdicts for the paper anchors and the SoMoSiMu-Bench alignment are in `events.jsonl` (`x.mou2024.anchor` / `x.mou2024.bench_alignment`). `hisim-tools reproduce` draws `hisim/figures/<run_slug>/{table3_hybrid_vs_pureabm,bench_alignment,mobilization_curves}.png`. The SoMoSiMu-Bench reference is a **synthetic** curve, not the raw benchmark dataset (see [Architecture](docs/architecture.md)).
 
 ## Documentation
 

@@ -2,19 +2,22 @@
 
 # Visualization
 
-The Python package `hisim-tools` (uv workspace member) reads the Rust output and renders figures with matplotlib / pandas / numpy / networkx.
+The Python package `hisim-tools` (uv workspace member) reads the Rust output and renders figures with matplotlib / pandas / numpy / networkx. How a run directory is read lives in the `runvault` package (`runvault.read`) — rather than scanning `results/` and guessing at the newest directory, the tools ask `runvault path`.
 
 ```bash
 uv sync
 ```
 
+Omitting `--results_dir` resolves the run through `runvault path --latest`, so `runvault` has to be on PATH or the `RUNVAULT` environment variable has to point at the binary. Figures are written outside the run directory (`results/hisim/figures/<run_slug>/`) — `manifest.csv` is settled when the run ends, so a figure added to `artifacts/` afterwards would carry no hash.
+
 ## `visualize` — single run
 
 ```bash
-uv run hisim-tools visualize --results_dir results/latest
+uv run hisim-tools visualize
+uv run hisim-tools visualize --results_dir "$(runvault path --experiment hisim --latest --subcommand run)"
 ```
 
-Reads `metrics.csv` (long-format) and writes `metrics_timeseries.png` (4 panels):
+Reads the run directory's `metrics.csv` and writes `metrics_timeseries.png` (4 panels):
 
 1. mean attitude `macro_bias` over time (collective bias; Table 3 ΔBias)
 2. `mobilized` count over time (the mobilization curve)
@@ -24,33 +27,34 @@ Reads `metrics.csv` (long-format) and writes `metrics_timeseries.png` (4 panels)
 ## `visualize-sweep` — sweep results
 
 ```bash
-uv run hisim-tools visualize-sweep --results_dir results/latest
+uv run hisim-tools visualize-sweep
+uv run hisim-tools visualize-sweep --results_dir "$(runvault path --experiment hisim --latest --subcommand sweep)"
 ```
 
-Reads `sweep_summary.csv` and writes `sweep_dependence.png` (3 panels): core-ratio dependence of final polarization per ABM model, per-model final polarization, and per-network final core influence.
+Rebuilds the one-row-per-trial table from the sweep parent's children (`hisim_tools.sweep_summary`) and writes `sweep_dependence.png` (3 panels): core-ratio dependence of final polarization per ABM model, per-model final polarization, and per-network final core influence.
 
 ## `show-experiment-settings`
 
 ```bash
-uv run hisim-tools show-experiment-settings --results-dir results/latest
-uv run hisim-tools show-experiment-settings --results-dir results/latest --json
+uv run hisim-tools show-experiment-settings
+uv run hisim-tools show-experiment-settings --json
 ```
 
-Prints the resolved `config.json` (or `sweep_config.json`) and, when present, the `run_metadata.json` LLM block (provider / model / endpoint / temperature / seed / core-ratio / cache-hit rate).
+Prints the `parameters` of `config.json` (a run and a sweep parent are told apart by the presence of `core_ratio_values`), the `llm` block of `run.json`, and the LLM call breakdown from `metrics.csv`. A pre-migration flat `config.json` / `sweep_config.json` / `run_metadata.json` is still read.
 
 ## `reproduce`
 
 ```bash
 uv run hisim-tools reproduce --run --mock          # run the Rust reproduce offline, then render the report + figures
 uv run hisim-tools reproduce --run --mock --quick  # fast smoke check
-uv run hisim-tools reproduce                        # visualize an existing results/latest reproduce run
-uv run hisim-tools reproduce --json                 # dump the raw reproduce_summary.json
+uv run hisim-tools reproduce                        # visualize the most recent reproduce run
+uv run hisim-tools reproduce --json                 # dump the condition cells, anchors and bench verdicts
 ```
 
-Reads the `reproduce_summary.json` written by `hisim reproduce` (the Table 3 hybrid-vs-pure-ABM matrix, the SoMoSiMu-Bench alignment, and the observed-vs-paper anchors) plus the per-condition `metrics_<label>.csv`, prints a PASS/off report, and writes three figures to `{results_dir}/figures/`:
+Reads the run directory `hisim reproduce` wrote — the condition cells from the run-scope metrics of `metrics.csv` (`<condition>_mean_final_*`), the PASS/off verdicts and bench alignment from `events.jsonl` (`x.mou2024.anchor` / `x.mou2024.bench_alignment`) — prints a PASS/off report, and writes three figures to `results/hisim/figures/<run_slug>/`:
 
 - `table3_hybrid_vs_pureabm.png` — final polarization and mobilization per ordinary-tier model, hybrid vs pure-ABM (BC/HK consensus vs SJ/Lorenz polarization; the LLM core drives mobilization).
-- `bench_alignment.png` — observed (simulator) vs reference movement metrics per movement; the reference is a **calibrated synthetic** curve, not the raw benchmark dataset.
+- `bench_alignment.png` — observed (simulator) vs reference movement metrics per movement; the reference is a **synthetic** curve, not the raw benchmark dataset.
 - `mobilization_curves.png` — representative-run mobilization time series, hybrid vs pure-ABM.
 
 With `--run --mock` the pipeline is fully offline (the pure-ABM arm and bench alignment make no LLM calls; the hybrid arm is driven by a scripted client).
