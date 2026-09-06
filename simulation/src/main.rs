@@ -13,11 +13,13 @@
 //! `latest` シンボリックリンクもこちらでは作らず，`Run::start` が決めた run
 //! ディレクトリへ書く．
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
-use runvault::{Lineage, Run, RunOptions};
+use runvault::{Lineage, Run, RunOptions, Stage};
 use serde::Serialize;
 
 use hisim_simulation::bench::{compare_to_bench, reference_curve, MovementMetrics};
@@ -26,10 +28,11 @@ use hisim_simulation::config::{
     NetworkConfig, NetworkKind, StanceMode,
 };
 use hisim_simulation::llm::{build_live_client, HiSimClient};
+use hisim_simulation::mechanisms::{no_observer, DecisionObserver};
 use hisim_simulation::metrics::StepMetrics;
 use hisim_simulation::record::{self, ANCHOR_EVENT, BENCH_EVENT, DOMAIN, EXPERIMENT, REPO_ID};
 use hisim_simulation::reproduce_mock::build_reproduce_client;
-use hisim_simulation::simulation::{run_with_client, SimulationResult};
+use hisim_simulation::simulation::{run_with_client_observed, SimulationResult};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -275,6 +278,35 @@ struct ReproduceArgs {
 // 補助
 // ---------------------------------------------------------------------------
 
+/// コア層の決定を数える stage を，メカニズムの中から突ける形にして渡す．
+///
+/// 数える場所は [`DecisionMechanism`](hisim_simulation::mechanisms::DecisionMechanism)
+/// の中である．メカニズムはエンジンへ `Box<dyn Mechanism<_>>` として入るので
+/// `'static` であり，呼び出し側の `Stage` を借用できない — そこで `Rc` で共有し，
+/// 走り終えたあとに [`close_shared`] で取り出して閉じる．
+fn share_stage(stage: Stage) -> (Rc<RefCell<Option<Stage>>>, DecisionObserver) {
+    let cell = Rc::new(RefCell::new(Some(stage)));
+    let observer: DecisionObserver = {
+        let cell = Rc::clone(&cell);
+        Rc::new(RefCell::new(move || {
+            if let Some(stage) = cell.borrow_mut().as_mut() {
+                stage.tick();
+            }
+        }))
+    };
+    (cell, observer)
+}
+
+/// 共有していた stage を取り出して閉じる．
+///
+/// manifest.csv は `finish()` で封をされる．その後に 1 行足せば，manifest が
+/// 食い違うダイジェストを持つことになる．
+fn close_shared(cell: &Rc<RefCell<Option<Stage>>>) {
+    if let Some(stage) = cell.borrow_mut().take() {
+        stage.close();
+    }
+}
+
 /// スイープ親 run の実験条件 (グリッド定義そのもの)．
 #[derive(Serialize)]
 struct SweepParameters {
@@ -459,7 +491,47 @@ fn cmd_run(args: RunArgs) {
     println!("出力先: {}", rv.dir().display());
     println!("-----------------------------------------------------------------");
 
-    let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+    // 進捗の単位は設定が決める．コア層があるならその 1 体の決定が費用で，無ければ
+    // 決定は一度も起きないので 1 タイムステップが費用になる．
+    //
+    // コア層あり (既定 --core-ratio 0.3 --n-agents 1000): 1 ステップが 300 回の
+    // LLM 呼び出しで，ローカル Ollama (llama3.2) の実測 1.36s/回 では 1 ステップ
+    // 約 6 分 48 秒，14 ステップで約 1 時間 35 分になる．ステップを数えたら
+    // 7 分近く同じ数字が出続ける．
+    //
+    // 純 ABM (--core-ratio 0.0): LLM 呼び出しは 0 回で，N=1000 T=14 の実測は 0s．
+    // それでも --n-agents は伸ばせるので，ステップを数える．
+    //
+    // どちらも分母を持たない．[`AggregateMechanism`] が bias の変化が tol 未満に
+    // なった時点で `request_stop` するので，`steps` は «到達しない上限» である．
+    let core_driven = cfg.core_ratio > 0.0;
+    let decisions = if core_driven {
+        let (cell, observer) = share_stage(rv.unbounded_stage("decisions"));
+        (Some(cell), observer)
+    } else {
+        (None, no_observer())
+    };
+    let mut step_stage = if core_driven {
+        None
+    } else {
+        Some(rv.unbounded_stage("steps"))
+    };
+
+    let result = run_with_client_observed(&cfg, client, decisions.1, |_| {
+        if let Some(stage) = step_stage.as_mut() {
+            stage.tick();
+        }
+    })
+    .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+
+    // stage は rv.finish() より先に閉じる (manifest.csv は finish() で封をされる)．
+    if let Some(cell) = &decisions.0 {
+        close_shared(cell);
+    }
+    if let Some(stage) = step_stage {
+        stage.close();
+    }
+
     record::log_simulation(&mut rv, &result);
 
     let last = result.metrics_history.last().unwrap();
@@ -586,6 +658,36 @@ fn cmd_sweep(args: SweepArgs) {
         abm_models.iter().map(|&m| (m, Vec::new())).collect();
     let mut done = 0usize;
 
+    // 1 本のスイープに，費用の桁が 5 つ違う 2 種類の仕事が同居する．core-ratio > 0
+    // のセルは 1 試行が数千回の LLM 呼び出しで，既定のグリッド (core-ratio
+    // 0.0..0.5 step 0.1 × abm 4 種 × runs 10) を live で回すと 736,000 回 =
+    // 実測 1.36s/回で約 11.6 日になる．core-ratio = 0 のセルは LLM を 1 度も呼ばず，
+    // 純 ABM のスイープ 40 試行が実測 2s で終わる．
+    //
+    // だから 1 つの stage にまとめず，違うものを名前で分ける．重み付けはしない —
+    // 1 試行の重みは走らせるまで分からず，速い側が遅い側の残り時間を決めてしまう．
+    //
+    // - `decisions`: コア層 1 体の決定 (core-ratio > 0 のセルの費用)．何回鳴るかは
+    //   予算と収束停止で決まるので分母を持てない．
+    // - `abm-trials`: 純 ABM セルの試行 1 本．試行の «本数» は途中で変わらないので
+    //   分母は正確である (各試行が収束で早く止まっても本数は減らない)．
+    //
+    // 分母は値列の `len()` から採る．core_ratio_step は 0.1 のような二進で表せない
+    // 刻みで，範囲を割って本数を出すと 1 本ずれる．
+    let abm_ratio_count = core_ratio_values.iter().filter(|&&r| r <= 0.0).count();
+    let abm_trials_total = abm_ratio_count * abm_models.len() * net_kinds.len() * args.runs;
+    let mut abm_trials = if abm_trials_total > 0 {
+        Some(parent.stage("abm-trials", abm_trials_total))
+    } else {
+        None
+    };
+    let decisions = if core_ratio_values.iter().any(|&r| r > 0.0) {
+        let (cell, observer) = share_stage(parent.unbounded_stage("decisions"));
+        (Some(cell), observer)
+    } else {
+        (None, no_observer())
+    };
+
     for &net_kind in &net_kinds {
         for &abm_model in &abm_models {
             for &core_ratio in &core_ratio_values {
@@ -659,8 +761,15 @@ fn cmd_sweep(args: SweepArgs) {
 
                     let client = build_live_client(&cfg.llm)
                         .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"));
-                    let result = run_with_client(&cfg, client)
-                        .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+                    let result =
+                        run_with_client_observed(&cfg, client, Rc::clone(&decisions.1), |_| {})
+                            .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+                    // 純 ABM のセルだけがここを数える (`abm_trials_total` と同じ条件)．
+                    if core_ratio <= 0.0 {
+                        if let Some(stage) = abm_trials.as_mut() {
+                            stage.tick();
+                        }
+                    }
 
                     // 旧 sweep_summary.csv の 1 行が terminal 行 1 本に対応する．
                     // metrics.csv に入れると (run_uid, step, scope, name) が重複する．
@@ -696,6 +805,14 @@ fn cmd_sweep(args: SweepArgs) {
                 );
             }
         }
+    }
+
+    // stage は finish() より先に閉じる (manifest.csv は finish() で封をされる)．
+    if let Some(stage) = abm_trials {
+        stage.close();
+    }
+    if let Some(cell) = &decisions.0 {
+        close_shared(cell);
     }
 
     let parent_dir = parent.finish().expect("runvault: sweep 親 run の完了に失敗");
@@ -819,6 +936,8 @@ fn run_repro_cell(
     root_seed: u64,
     mock: bool,
     llm: &LlmSettings,
+    observer: DecisionObserver,
+    on_abm_trial: &mut dyn FnMut(),
 ) -> ReproCellResult {
     let mut final_bias = 0.0;
     let mut final_div = 0.0;
@@ -859,8 +978,14 @@ fn run_repro_cell(
             build_live_client(&cfg.llm)
                 .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗 ({label}): {e}"))
         };
-        let result: SimulationResult = run_with_client(&cfg, client)
-            .unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"));
+        let result: SimulationResult =
+            run_with_client_observed(&cfg, client, Rc::clone(&observer), |_| {})
+                .unwrap_or_else(|e| panic!("実行に失敗 ({label}): {e}"));
+        // 純 ABM のセルだけが試行を数える (LLM を 1 度も呼ばないので `observer` は
+        // 鳴らない)．`cmd_reproduce` の `abm_trials_total` と同じ条件である．
+        if core_ratio <= 0.0 {
+            on_abm_trial();
+        }
 
         let first = result.metrics_history.first().unwrap();
         let last = result.metrics_history.last().unwrap();
@@ -1028,6 +1153,35 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("出力先: {}", rv.dir().display());
     println!("-----------------------------------------------------------------");
 
+    // 進捗の単位を 2 つに分ける．費用の桁が違うものを 1 つの stage にまとめると，
+    // 速い側が遅い側の残り時間を決めてしまう．重み付けはしない — 1 試行の重みは
+    // 走らせるまで分からない．
+    //
+    // - `decisions` (分母なし): hybrid セルのコア層 1 体の決定．既定 (N=600
+    //   core-ratio 0.3 runs 5 abm 4 種) の live では 4×5×180×14 = 50,400 回の LLM
+    //   呼び出しで，実測 1.36s/回では約 19 時間になる．1 ステップだけでも 180 回 =
+    //   約 4 分なので，ステップやセルでは粗すぎる．
+    // - `abm-trials` (分母あり): 純 ABM セルの試行 1 本．LLM を 1 度も呼ばず，
+    //   `reproduce --mock` 全体が実測 2s で終わる速さである．試行の «本数» は
+    //   セル数 × runs で確定していて，各試行が収束で早く止まっても減らない．
+    //
+    // --core-ratio 0.0 を渡すと hybrid セルも LLM を呼ばなくなるので，そのぶんを
+    // 純 ABM 側の本数に加える (`run_repro_cell` が `core_ratio <= 0.0` で数える条件と
+    // 一致させる)．
+    let hybrid_is_abm = args.core_ratio <= 0.0;
+    let abm_cells =
+        abm_models.len() + datasets.len() + if hybrid_is_abm { abm_models.len() } else { 0 };
+    let mut abm_trials = if abm_cells * runs > 0 {
+        Some(rv.stage("abm-trials", abm_cells * runs))
+    } else {
+        None
+    };
+    let decisions = if hybrid_is_abm {
+        (None, no_observer())
+    } else {
+        let (cell, observer) = share_stage(rv.unbounded_stage("decisions"));
+        (Some(cell), observer)
+    };
     // --- Table 3: hybrid vs pure-abm の ABM 別行列 (代表 dataset = 先頭) ---
     // 純 ABM 経路 (core-ratio 0) は LLM 0 呼び出しで完全決定論的 = オフライン検証経路．
     let table3_dataset = datasets
@@ -1052,6 +1206,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
                 args.seed,
                 args.mock,
                 &llm,
+                Rc::clone(&decisions.1),
+                &mut || {
+                    if let Some(stage) = abm_trials.as_mut() {
+                        stage.tick();
+                    }
+                },
             );
             // 11 条件が 1 本の run に同居するので，(step, scope, name) が衝突しない
             // よう条件ラベルを名前に付ける．
@@ -1068,8 +1228,25 @@ fn cmd_reproduce(args: ReproduceArgs) {
     for ds in &datasets {
         let label = format!("bench_{ds}");
         let out = run_repro_cell(
-            &label, "pure-abm", bench_abm, 0.0, net_kind, ds, n_agents, steps, stance, runs,
-            args.seed, args.mock, &llm,
+            &label,
+            "pure-abm",
+            bench_abm,
+            0.0,
+            net_kind,
+            ds,
+            n_agents,
+            steps,
+            stance,
+            runs,
+            args.seed,
+            args.mock,
+            &llm,
+            Rc::clone(&decisions.1),
+            &mut || {
+                if let Some(stage) = abm_trials.as_mut() {
+                    stage.tick();
+                }
+            },
         );
         record::log_history(&mut rv, Some(&label), &out.representative);
 
@@ -1265,6 +1442,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("-----------------------------------------------------------------");
     println!("{}/{} アンカーが in-band", n_pass, anchors.len());
     println!("{}/{} bench 指標が整合帯", bench_aligned, bench_total);
+
+    // stage は finish() より先に閉じる (manifest.csv は finish() で封をされる)．
+    if let Some(stage) = abm_trials {
+        stage.close();
+    }
+    if let Some(cell) = &decisions.0 {
+        close_shared(cell);
+    }
 
     let dir = rv.finish().expect("runvault: run の完了に失敗");
     println!("条件別メトリクス → {}/metrics.csv", dir.display());

@@ -38,6 +38,23 @@ pub type SharedMetadata = Rc<RefCell<MetadataCollector>>;
 /// 共有 LLM 呼び出し予算カウンタ (run 全体で残数を管理)．
 pub type SharedBudget = Rc<RefCell<usize>>;
 
+/// [`DecisionMechanism`] がコア層 1 体を処理するたびに 1 つ進む観測子．
+///
+/// 費用はステップではなくコア層 1 体の意思決定にある．コア層は毎ステップ全員が
+/// «この状況でどう振る舞うか» をモデルに尋ねるので，既定 (`--core-ratio 0.3
+/// --n-agents 1000`) では 1 ステップが 300 回の呼び出しになる．ローカル Ollama
+/// (llama3.2) の 1 回あたり 1.36s を掛けると **1 ステップが約 6 分 48 秒**で，
+/// ステップを数えていたらその間ずっと同じ数字が出続ける．
+///
+/// 借用ではなく共有にしてあるのは，メカニズムが `Box<dyn Mechanism<_>>` として
+/// エンジンへ入る `'static` の値で，呼び出し側の `Stage` を借用できないためである．
+pub type DecisionObserver = Rc<RefCell<dyn FnMut()>>;
+
+/// 何も数えない観測子 (進捗を報告しない呼び出し側のための既定)．
+pub fn no_observer() -> DecisionObserver {
+    Rc::new(RefCell::new(|| {}))
+}
+
 /// scratch キー: 当該ステップでコア層が発信したメッセージ (態度値; Decision → Interaction)．
 const SCRATCH_BROADCASTS: &str = "core_broadcasts";
 /// scratch キー: 当該ステップで LLM を呼んだコアエージェント数．
@@ -118,16 +135,18 @@ pub struct DecisionMechanism {
     budget: SharedBudget,
     settings: LlmSettings,
     stance: StanceMode,
+    observer: DecisionObserver,
 }
 
 impl DecisionMechanism {
-    /// 共有クライアント・メタデータ・予算・LLM 設定・stance モードから作る．
+    /// 共有クライアント・メタデータ・予算・LLM 設定・stance モード・観測子から作る．
     pub fn new(
         client: SharedClient,
         metadata: SharedMetadata,
         budget: SharedBudget,
         settings: LlmSettings,
         stance: StanceMode,
+        observer: DecisionObserver,
     ) -> Self {
         DecisionMechanism {
             client,
@@ -135,6 +154,7 @@ impl DecisionMechanism {
             budget,
             settings,
             stance,
+            observer,
         }
     }
 
@@ -204,6 +224,10 @@ impl Mechanism<HiSimWorld> for DecisionMechanism {
             if *self.budget.borrow() == 0 {
                 break;
             }
+            // 数えるのは «処理したコア層 1 体»．コア状態が無くて呼び出しに至らない
+            // 分も数える — 数えているのは試みた仕事である．予算切れで break した
+            // 残りは数えない (そこから先はモデルを呼ばず，純 ABM の速度で終わる)．
+            (self.observer.borrow_mut())();
             let attitude = *ctx.world.attitude.get(&id).unwrap_or(&0.0);
             let (profile, memory) = match ctx.world.core.get(&id) {
                 Some(cs) => (cs.profile.clone(), cs.memory.clone()),

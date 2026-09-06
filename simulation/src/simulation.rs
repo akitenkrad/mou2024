@@ -30,8 +30,8 @@ use socsim_net::SocialNetwork;
 use crate::config::{Config, NetworkKind};
 use crate::llm::HiSimClient;
 use crate::mechanisms::{
-    AggregateMechanism, DecisionMechanism, EnvironmentMechanism, MobilizationMechanism,
-    SharedBudget, SharedClient, SharedMetadata,
+    no_observer, AggregateMechanism, DecisionMechanism, DecisionObserver, EnvironmentMechanism,
+    MobilizationMechanism, SharedBudget, SharedClient, SharedMetadata,
 };
 use crate::metrics::StepMetrics;
 use crate::world::{CoreState, HiSimWorld, Tier};
@@ -130,6 +130,25 @@ pub fn run_with_client(
     cfg: &Config,
     client: HiSimClient,
 ) -> std::result::Result<SimulationResult, String> {
+    run_with_client_observed(cfg, client, no_observer(), |_| {})
+}
+
+/// [`run_with_client`] と同じもので，進捗を数える 2 つの観測子を受け取る．
+///
+/// - `decisions` はコア層 1 体を処理するたびに呼ばれる ([`DecisionObserver`])．
+///   `core_ratio > 0` のときの費用はここにある．
+/// - `on_step` は 1 タイムステップごとに呼ばれる．`core_ratio = 0` の純 ABM では
+///   コア層が 0 体で `decisions` が一度も鳴らないので，そのときの単位はこちら．
+///
+/// 呼び出し側 (`main.rs`) が設定を見てどちらを stage に繋ぐかを選ぶ．入口の
+/// [`run_with_client`] は何もしない観測子を渡す薄い包みで，既存の呼び出し側と
+/// テストの挙動は変わらない．
+pub fn run_with_client_observed(
+    cfg: &Config,
+    client: HiSimClient,
+    decisions: DecisionObserver,
+    mut on_step: impl FnMut(usize),
+) -> std::result::Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
 
     let mut init_rng = SimRng::from_seed(derive_seed(root, &[RNG_WORLD_INIT]));
@@ -152,6 +171,7 @@ pub fn run_with_client(
             Rc::clone(&shared_budget),
             cfg.llm.clone(),
             cfg.stance,
+            decisions,
         )))
         .add_mechanism(Box::new(MobilizationMechanism::new(cfg.abm)))
         .add_mechanism(Box::new(AggregateMechanism::new(
@@ -194,6 +214,7 @@ pub fn run_with_client(
         ));
         converged = report.stopped;
         final_step = t;
+        on_step(t);
     })
     .map_err(|e| format!("シミュレーションの実行に失敗: {e}"))?;
 
