@@ -1,3 +1,1119 @@
-# Metric descriptions are not written yet (MYTASK-3382). Until they are,
-# runvault records undeclared metrics instead of refusing them.
-require_docs = false
+# 指標が何を測っているか (runvault の宣言．rs-runvault docs/metrics.ja.md)．
+#
+# 名前は `simulation/src/record.rs` と `simulation/src/main.rs` が記録するものと一致していなければならない．
+#
+# `direction` は «値が大きいほど良いか»．模型の状態や到達量は成績ではないので
+# `none` とし，再現精度やキャッシュ効率のように評価方向が定まる量だけ `up` /
+# `down` とする．
+#
+# 条件名を `_` で指標名へ連結するため，有限な ABM 条件と公開 CLI が案内する 3 データセットを展開して明示する．
+
+[metrics."macro_bias"]
+meaning   = "全エージェントの態度の平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."macro_diversity"]
+meaning   = "エージェントの態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mobilized"]
+meaning   = "態度の絶対値が動員しきい値以上のエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."polarization"]
+meaning   = "正負の極端群の積で測る態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."core_influence"]
+meaning   = "LLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."llm_actions"]
+meaning   = "そのステップで LLM 呼び出しを行ったコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."converged"]
+meaning   = "収束して終わったなら 1，打ち切りなら 0"
+unit      = "boolean"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."final_step"]
+meaning   = "シミュレーションが停止したステップ数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_calls"]
+meaning   = "この run が行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hits"]
+meaning   = "そのうちキャッシュで済んだ回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hit_rate"]
+meaning   = "LLM 呼び出しのうちキャッシュで済んだ割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."n_converged"]
+meaning   = "この条件の試行のうち収束した本数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_final_macro_bias"]
+meaning   = "試行群にわたる最終平均態度の平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_macro_diversity"]
+meaning   = "試行群にわたる最終態度分散の平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_mobilized"]
+meaning   = "試行群にわたる最終動員エージェント数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_final_polarization"]
+meaning   = "試行群にわたる最終二極化度の平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_core_influence"]
+meaning   = "試行群にわたる最終コア層平均態度の平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_llm_calls"]
+meaning   = "試行群にわたる LLM 呼び出し回数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_bc_macro_bias"]
+meaning   = "pureabm / bc 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_macro_diversity"]
+meaning   = "pureabm / bc 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_mobilized"]
+meaning   = "pureabm / bc 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_bc_polarization"]
+meaning   = "pureabm / bc 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_core_influence"]
+meaning   = "pureabm / bc 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_llm_actions"]
+meaning   = "pureabm / bc 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_bc_mean_final_bias"]
+meaning   = "pureabm / bc 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_mean_final_diversity"]
+meaning   = "pureabm / bc 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_mean_final_polarization"]
+meaning   = "pureabm / bc 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_mean_final_mobilization"]
+meaning   = "pureabm / bc 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_mean_mobilization_gain"]
+meaning   = "pureabm / bc 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_bc_mean_llm_calls"]
+meaning   = "pureabm / bc 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_bc_macro_bias"]
+meaning   = "hybrid / bc 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_macro_diversity"]
+meaning   = "hybrid / bc 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_mobilized"]
+meaning   = "hybrid / bc 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_bc_polarization"]
+meaning   = "hybrid / bc 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_core_influence"]
+meaning   = "hybrid / bc 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_llm_actions"]
+meaning   = "hybrid / bc 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_bc_mean_final_bias"]
+meaning   = "hybrid / bc 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_mean_final_diversity"]
+meaning   = "hybrid / bc 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_mean_final_polarization"]
+meaning   = "hybrid / bc 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_mean_final_mobilization"]
+meaning   = "hybrid / bc 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_mean_mobilization_gain"]
+meaning   = "hybrid / bc 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_bc_mean_llm_calls"]
+meaning   = "hybrid / bc 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_hk_macro_bias"]
+meaning   = "pureabm / hk 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_macro_diversity"]
+meaning   = "pureabm / hk 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_mobilized"]
+meaning   = "pureabm / hk 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_hk_polarization"]
+meaning   = "pureabm / hk 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_core_influence"]
+meaning   = "pureabm / hk 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_llm_actions"]
+meaning   = "pureabm / hk 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_hk_mean_final_bias"]
+meaning   = "pureabm / hk 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_mean_final_diversity"]
+meaning   = "pureabm / hk 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_mean_final_polarization"]
+meaning   = "pureabm / hk 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_mean_final_mobilization"]
+meaning   = "pureabm / hk 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_mean_mobilization_gain"]
+meaning   = "pureabm / hk 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_hk_mean_llm_calls"]
+meaning   = "pureabm / hk 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_hk_macro_bias"]
+meaning   = "hybrid / hk 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_macro_diversity"]
+meaning   = "hybrid / hk 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_mobilized"]
+meaning   = "hybrid / hk 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_hk_polarization"]
+meaning   = "hybrid / hk 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_core_influence"]
+meaning   = "hybrid / hk 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_llm_actions"]
+meaning   = "hybrid / hk 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_hk_mean_final_bias"]
+meaning   = "hybrid / hk 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_mean_final_diversity"]
+meaning   = "hybrid / hk 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_mean_final_polarization"]
+meaning   = "hybrid / hk 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_mean_final_mobilization"]
+meaning   = "hybrid / hk 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_mean_mobilization_gain"]
+meaning   = "hybrid / hk 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_hk_mean_llm_calls"]
+meaning   = "hybrid / hk 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_sj_macro_bias"]
+meaning   = "pureabm / sj 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_macro_diversity"]
+meaning   = "pureabm / sj 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_mobilized"]
+meaning   = "pureabm / sj 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_sj_polarization"]
+meaning   = "pureabm / sj 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_core_influence"]
+meaning   = "pureabm / sj 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_llm_actions"]
+meaning   = "pureabm / sj 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_sj_mean_final_bias"]
+meaning   = "pureabm / sj 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_mean_final_diversity"]
+meaning   = "pureabm / sj 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_mean_final_polarization"]
+meaning   = "pureabm / sj 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_mean_final_mobilization"]
+meaning   = "pureabm / sj 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_mean_mobilization_gain"]
+meaning   = "pureabm / sj 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_sj_mean_llm_calls"]
+meaning   = "pureabm / sj 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_sj_macro_bias"]
+meaning   = "hybrid / sj 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_macro_diversity"]
+meaning   = "hybrid / sj 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_mobilized"]
+meaning   = "hybrid / sj 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_sj_polarization"]
+meaning   = "hybrid / sj 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_core_influence"]
+meaning   = "hybrid / sj 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_llm_actions"]
+meaning   = "hybrid / sj 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_sj_mean_final_bias"]
+meaning   = "hybrid / sj 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_mean_final_diversity"]
+meaning   = "hybrid / sj 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_mean_final_polarization"]
+meaning   = "hybrid / sj 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_mean_final_mobilization"]
+meaning   = "hybrid / sj 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_mean_mobilization_gain"]
+meaning   = "hybrid / sj 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_sj_mean_llm_calls"]
+meaning   = "hybrid / sj 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_macro_bias"]
+meaning   = "pureabm / lorenz 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_macro_diversity"]
+meaning   = "pureabm / lorenz 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mobilized"]
+meaning   = "pureabm / lorenz 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_polarization"]
+meaning   = "pureabm / lorenz 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_core_influence"]
+meaning   = "pureabm / lorenz 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_llm_actions"]
+meaning   = "pureabm / lorenz 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mean_final_bias"]
+meaning   = "pureabm / lorenz 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mean_final_diversity"]
+meaning   = "pureabm / lorenz 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mean_final_polarization"]
+meaning   = "pureabm / lorenz 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mean_final_mobilization"]
+meaning   = "pureabm / lorenz 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mean_mobilization_gain"]
+meaning   = "pureabm / lorenz 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."pureabm_lorenz_mean_llm_calls"]
+meaning   = "pureabm / lorenz 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_macro_bias"]
+meaning   = "hybrid / lorenz 条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_macro_diversity"]
+meaning   = "hybrid / lorenz 条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mobilized"]
+meaning   = "hybrid / lorenz 条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_polarization"]
+meaning   = "hybrid / lorenz 条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_core_influence"]
+meaning   = "hybrid / lorenz 条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_llm_actions"]
+meaning   = "hybrid / lorenz 条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mean_final_bias"]
+meaning   = "hybrid / lorenz 条件における最終平均態度の試行平均"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mean_final_diversity"]
+meaning   = "hybrid / lorenz 条件における最終態度分散の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mean_final_polarization"]
+meaning   = "hybrid / lorenz 条件における最終二極化度の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mean_final_mobilization"]
+meaning   = "hybrid / lorenz 条件における最終動員率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mean_mobilization_gain"]
+meaning   = "hybrid / lorenz 条件における最終動員率から初期動員率を引いた差の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_lorenz_mean_llm_calls"]
+meaning   = "hybrid / lorenz 条件におけるLLM 呼び出し回数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_metoo_macro_bias"]
+meaning   = "metoo ベンチ条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_macro_diversity"]
+meaning   = "metoo ベンチ条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_mobilized"]
+meaning   = "metoo ベンチ条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_metoo_polarization"]
+meaning   = "metoo ベンチ条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_core_influence"]
+meaning   = "metoo ベンチ条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_llm_actions"]
+meaning   = "metoo ベンチ条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_metoo_mobilization_peak"]
+meaning   = "metoo ベンチ条件における動員率の最大値"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_peak_step"]
+meaning   = "metoo ベンチ条件における動員率が最大になったステップ"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_metoo_final_mobilization"]
+meaning   = "metoo ベンチ条件における最終動員率"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_final_bias"]
+meaning   = "metoo ベンチ条件における最終平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_final_polarization"]
+meaning   = "metoo ベンチ条件における最終二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_sustain_ratio"]
+meaning   = "metoo ベンチ条件におけるピーク動員率に対する最終動員率の比"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_metoo_n_aligned"]
+meaning   = "metoo ベンチ条件における合成参照の許容帯と整合した運動指標の数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."bench_metoo_n_total"]
+meaning   = "metoo ベンチ条件における合成参照と照合した運動指標の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_roe_macro_bias"]
+meaning   = "roe ベンチ条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_macro_diversity"]
+meaning   = "roe ベンチ条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_mobilized"]
+meaning   = "roe ベンチ条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_roe_polarization"]
+meaning   = "roe ベンチ条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_core_influence"]
+meaning   = "roe ベンチ条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_llm_actions"]
+meaning   = "roe ベンチ条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_roe_mobilization_peak"]
+meaning   = "roe ベンチ条件における動員率の最大値"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_peak_step"]
+meaning   = "roe ベンチ条件における動員率が最大になったステップ"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_roe_final_mobilization"]
+meaning   = "roe ベンチ条件における最終動員率"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_final_bias"]
+meaning   = "roe ベンチ条件における最終平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_final_polarization"]
+meaning   = "roe ベンチ条件における最終二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_sustain_ratio"]
+meaning   = "roe ベンチ条件におけるピーク動員率に対する最終動員率の比"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_roe_n_aligned"]
+meaning   = "roe ベンチ条件における合成参照の許容帯と整合した運動指標の数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."bench_roe_n_total"]
+meaning   = "roe ベンチ条件における合成参照と照合した運動指標の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_blm_macro_bias"]
+meaning   = "blm ベンチ条件における全エージェントの平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_macro_diversity"]
+meaning   = "blm ベンチ条件における態度分布の母分散"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_mobilized"]
+meaning   = "blm ベンチ条件における動員されたエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_blm_polarization"]
+meaning   = "blm ベンチ条件における態度分布の二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_core_influence"]
+meaning   = "blm ベンチ条件におけるLLM コア層の平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_llm_actions"]
+meaning   = "blm ベンチ条件におけるLLM を呼び出したコアエージェント数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_blm_mobilization_peak"]
+meaning   = "blm ベンチ条件における動員率の最大値"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_peak_step"]
+meaning   = "blm ベンチ条件における動員率が最大になったステップ"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_blm_final_mobilization"]
+meaning   = "blm ベンチ条件における最終動員率"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_final_bias"]
+meaning   = "blm ベンチ条件における最終平均態度"
+unit      = "score"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_final_polarization"]
+meaning   = "blm ベンチ条件における最終二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_sustain_ratio"]
+meaning   = "blm ベンチ条件におけるピーク動員率に対する最終動員率の比"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."bench_blm_n_aligned"]
+meaning   = "blm ベンチ条件における合成参照の許容帯と整合した運動指標の数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."bench_blm_n_total"]
+meaning   = "blm ベンチ条件における合成参照と照合した運動指標の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."pure_abm_zero_llm_calls"]
+meaning   = "純 ABM の LLM 呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."polarization_lorenz_ge_bc"]
+meaning   = "純 ABM Lorenz の最終二極化度から BC の値を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."polarization_sj_ge_bc"]
+meaning   = "純 ABM SJ の最終二極化度から BC の値を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."bc_low_polarization"]
+meaning   = "純 ABM BC の最終二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hk_low_polarization"]
+meaning   = "純 ABM HK の最終二極化度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hybrid_amplifies_mobilization"]
+meaning   = "hybrid BC の動員率増分から純 ABM BC の増分を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."anchors_passed"]
+meaning   = "許容帯内だった論文知見アンカーの数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."anchors_total"]
+meaning   = "照合した論文知見アンカーの数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."bench_aligned"]
+meaning   = "合成ベンチ参照の許容帯と整合した指標の総数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."bench_total"]
+meaning   = "合成ベンチ参照と照合した指標の総数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
