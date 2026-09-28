@@ -46,6 +46,9 @@ use hisim_simulation::simulation::{run_with_client_observed, SimulationResult};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Development run: write it under results/_scratch/ so it is never synced to the vault.
+    #[arg(long, global = true)]
+    scratch: bool,
 
     /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
     #[arg(long, global = true)]
@@ -408,7 +411,7 @@ fn network_config(
 // run
 // ---------------------------------------------------------------------------
 
-fn cmd_run(args: RunArgs) {
+fn cmd_run(args: RunArgs, scratch: bool) {
     let abm_model = parse_abm(&args.abm).unwrap_or_else(|e| panic!("{}", e));
     let net_kind = parse_network(&args.network).unwrap_or_else(|e| panic!("{}", e));
     let stance = parse_stance_mode(&args.stance_annotator).unwrap_or_else(|e| panic!("{}", e));
@@ -457,6 +460,7 @@ fn cmd_run(args: RunArgs) {
     let parameters = cfg.to_run_config_json(seed);
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "run")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -562,7 +566,7 @@ fn cmd_run(args: RunArgs) {
 // sweep
 // ---------------------------------------------------------------------------
 
-fn cmd_sweep(args: SweepArgs) {
+fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let core_ratio_values = ratio_values(
         args.core_ratio_min,
         args.core_ratio_max,
@@ -620,6 +624,7 @@ fn cmd_sweep(args: SweepArgs) {
     // sweep_id は runvault が親の run_slug で埋める．
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "sweep")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -710,6 +715,7 @@ fn cmd_sweep(args: SweepArgs) {
                 // 同じ条件の繰り返しは無いので replicate_index は 0．
                 let mut child = Run::start(
                     RunOptions::new(EXPERIMENT, "sweep-point")
+                        .scratch(scratch)
                         .repo_id(REPO_ID)
                         .domain(DOMAIN)
                         .results_root(&args.output_dir)
@@ -1065,7 +1071,7 @@ fn movement_metrics(m: &MovementMetrics) -> [(&'static str, f64); 6] {
     ]
 }
 
-fn cmd_reproduce(args: ReproduceArgs) {
+fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let datasets = split_csv(&args.datasets);
     let abm_models: Vec<AbmModel> = split_csv(&args.abm_values)
         .iter()
@@ -1126,6 +1132,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "reproduce")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1462,12 +1469,13 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    let scratch = cli.scratch;
     if let Some(host) = cli.ollama_host.as_deref() {
         std::env::set_var("OLLAMA_HOST", host);
     }
     match cli.command {
-        Commands::Run(args) => cmd_run(args),
-        Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce(args) => cmd_reproduce(args),
+        Commands::Run(args) => cmd_run(args, scratch),
+        Commands::Sweep(args) => cmd_sweep(args, scratch),
+        Commands::Reproduce(args) => cmd_reproduce(args, scratch),
     }
 }

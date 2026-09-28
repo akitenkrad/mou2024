@@ -67,6 +67,11 @@ uv run hisim-tools reproduce --run --mock          # reproduce report + figures,
 cargo run --release --example mock_smoke -- results
 ```
 
+
+## Scratch runs
+
+Use `--scratch` for development, debugging, and smoke-test runs. Scratch runs are created under `results/_scratch/`, are never synced to the vault, and the latest scratch run can be located with `runvault path --scratch`.
+
 ## Output
 
 [runvault](https://github.com/akitenkrad/rs-runvault) owns where output goes and how it is named. One subcommand invocation is one run, and the run directory *is* the output directory, so there is no timestamped subdirectory and no `latest` symlink. `runvault path --experiment hisim --latest` prints the most recent finished run.

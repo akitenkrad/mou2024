@@ -67,6 +67,11 @@ uv run hisim-tools reproduce --run --mock          # reproduce レポート + �
 cargo run --release --example mock_smoke -- results
 ```
 
+
+## Scratch run
+
+開発中・デバッグ中・動作確認の実行には `--scratch` を付ける．run は `results/_scratch/` に作られ，同期されない．最新の scratch run は `runvault path --scratch` で取得できる．
+
 ## 出力
 
 出力の置き場と同一性は [runvault](https://github.com/akitenkrad/rs-runvault) が持つ．サブコマンド 1 回が run 1 本で，run ディレクトリが出力先そのものなので，タイムスタンプ付きサブディレクトリも `latest` シンボリックリンクも作らない．直近の完了 run のパスは `runvault path --experiment hisim --latest` で取れる．
